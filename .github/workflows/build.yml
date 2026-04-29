@@ -77,12 +77,12 @@ jobs:
           path: build-${{ matrix.label }}.log
 
   # -----------------------------------------------------------------------
-  # Create a GitHub Release with both debs when a version tag is pushed
+  # Create a draft GitHub Release with both debs when a version tag is pushed
   # -----------------------------------------------------------------------
   release:
     name: GitHub Release
     needs: build
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -92,9 +92,27 @@ jobs:
         with:
           path: release-artifacts
           pattern: DiCoy-*
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/**/*.deb
-          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: DiCoy ${{ github.ref_name }}
+          draft: true
+          files: release-artifacts/*.deb
+          body: |
+            ## Installation
+
+            Download the `.deb` that matches your jailbreak and install it via your package manager (Sileo, Zebra) or Filza.
+
+            | File | iOS | Jailbreak |
+            |------|-----|-----------|
+            | `*_iphoneos-arm64_rootless.deb` | 15.0 – 17.0 | Dopamine 2.x · palera1n rootless · RootHide |
+            | `*_iphoneos-arm_rootful.deb` | 15.0 – 17.0 | checkra1n · unc0ver · palera1n rootful |
+
+            Both packages require **MobileSubstrate / ElleKit** and **PreferenceLoader**.
+
+            After installation the daemon starts automatically. Open **Settings → DiCoy** to configure the injection mode.
+
+            > Changing the **Frame Rate** setting requires restarting the target app to take effect.
