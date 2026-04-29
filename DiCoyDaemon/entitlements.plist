@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required to use private IOKit services (IOMobileFramebuffer, CARenderServer). -->
+    <key>com.apple.private.IOKit</key>
+    <true/>
+
+    <!-- Allows the daemon to create globally-accessible IOSurfaces that
+         sandboxed processes can look up via IOSurfaceLookup(id). -->
+    <key>com.apple.iokit.IOSurfaceFamily</key>
+    <true/>
+
+    <!-- Required to send Mach messages to CARenderServer. -->
+    <key>com.apple.CARenderServer</key>
+    <true/>
+
+    <!-- Allows access to the display framebuffer service. -->
+    <key>com.apple.private.framebuffer</key>
+    <true/>
+
+    <!-- Suppresses the default app sandbox so the daemon can bind to
+         /var/jb/var/run/dicoy.sock and write log files. -->
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+
+    <!-- Marks this binary as a platform application (required for certain
+         private API access on rootless jailbreaks with CoreTrust bypasses). -->
+    <key>platform-application</key>
+    <true/>
+</dict>
+</plist>

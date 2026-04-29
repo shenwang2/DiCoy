@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dicoy.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>%%JB_PREFIX%%/usr/sbin/DiCoyDaemon</string>
+    </array>
+
+    <!-- Start automatically at boot and restart if the process crashes. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Both streams go to the same log for convenience.
+         Rotate with newsyslog or check here after crashes. -->
+    <key>StandardOutPath</key>
+    <string>%%JB_PREFIX%%/var/log/dicoy-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>%%JB_PREFIX%%/var/log/dicoy-daemon.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/mobile</string>
+    </dict>
+
+    <!-- Nice value: 0 = normal priority. Lower number = higher priority.
+         Keep at 0 to avoid starving SpringBoard; the capture loop sleeps
+         between frames so CPU impact is bounded. -->
+    <key>Nice</key>
+    <integer>0</integer>
+</dict>
+</plist>
