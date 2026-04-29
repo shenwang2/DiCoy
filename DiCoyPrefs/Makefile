@@ -31,8 +31,4 @@ before-package::
 	cp $(THEOS_PROJECT_DIR)/entry.plist \
 	    $(THEOS_PROJECT_DIR)/layout/$(_PREFLOADER_LAYOUT)/DiCoy.plist
 
-after-install::
-	install.exec "mkdir -p $(JB_PREFIX)/Library/PreferenceLoader/Preferences"
-	install.exec "cp $(THEOS_PROJECT_DIR)/entry.plist $(JB_PREFIX)/Library/PreferenceLoader/Preferences/DiCoy.plist"
-
 include $(THEOS)/makefiles/bundle.mk
