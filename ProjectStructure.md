@@ -37,8 +37,10 @@ DiCoy/
 ├── .github/
 │   └── workflows/
 │       └── build.yml                     GitHub Actions CI/CD workflow. Matrix builds
-│                                         rootless and rootful .deb artifacts; creates
-│                                         a GitHub Release on version tags.
+│                                         rootless and rootful .deb artifacts on macos-14
+│                                         using iPhoneOS16.5.sdk. Creates or updates a
+│                                         GitHub Release on every push to main/master
+│                                         (not PRs); version tag sourced from control file.
 │
 │
 ├── DiCoyDaemon/                          ── Privileged background daemon ──────────────────
