@@ -30,6 +30,7 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <os/lock.h>
 #import <notify.h>
 #import "DiCoyClient.h"
 #import "DiCoyProtocol.h"
@@ -94,13 +95,15 @@
 
         // Called on client's private read queue for each FRAME_READY from daemon.
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
+            DiCoyTweakManager *strong = weak;
+            if (!strong) return;
             CFRetain(surface);
-            os_unfair_lock_lock(&weak->_surfaceLock);
-            IOSurfaceRef old = weak.latestSurface;
-            weak.latestSurface = surface;
-            weak.surfaceWidth  = w;
-            weak.surfaceHeight = h;
-            os_unfair_lock_unlock(&weak->_surfaceLock);
+            os_unfair_lock_lock(&strong->_surfaceLock);
+            IOSurfaceRef old = strong.latestSurface;
+            strong.latestSurface = surface;
+            strong.surfaceWidth  = w;
+            strong.surfaceHeight = h;
+            os_unfair_lock_unlock(&strong->_surfaceLock);
             if (old) CFRelease(old);
         };
     }
