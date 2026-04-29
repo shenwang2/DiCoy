@@ -8,21 +8,7 @@ BUNDLE_NAME = DiCoyPrefs
 DiCoyPrefs_FILES      = DiCoyPrefsListController.m
 DiCoyPrefs_FRAMEWORKS = Foundation UIKit Preferences
 
-# --------------------------------------------------------------------------
-# AltList.framework (vendored) – provides the app-selection preference cells
-# (ATLApplicationListSelectionController etc.) used for per-app targeting.
-# Link as a weak framework so the prefs bundle loads even if AltList is not
-# yet installed on the device; the relevant cells simply won't be usable.
-# --------------------------------------------------------------------------
-VENDOR_DIR            = $(THEOS_PROJECT_DIR)/../vendor
-ALTLIST_FRAMEWORK     = $(VENDOR_DIR)/AltList.framework
-
-DiCoyPrefs_CFLAGS     = -fobjc-arc \
-                        -F$(VENDOR_DIR) \
-                        -I$(ALTLIST_FRAMEWORK)/Headers
-
-DiCoyPrefs_LDFLAGS    = -F$(VENDOR_DIR) \
-                        -weak_framework AltList
+DiCoyPrefs_CFLAGS     = -fobjc-arc
 
 DiCoyPrefs_RESOURCE_DIRS = Resources
 
