@@ -30,15 +30,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Randomblock1/theos-action handles cloning Theos, setting $THEOS,
-      # and caching the tree. macOS-14 provides Xcode's clang/ld natively,
-      # so no cross-compilation toolchain needs to be downloaded separately.
       - name: Setup Theos
         uses: Randomblock1/theos-action@v1
         with:
           theos-sdks: 'https://github.com/theos/sdks'
 
-      # Download the specific SDK version needed for iOS 15.0 minimum target.
       - name: Download iPhoneOS16.5.sdk
         run: |
           mkdir -p $THEOS/sdks
@@ -48,12 +44,13 @@ jobs:
 
       - name: Build (${{ matrix.label }})
         run: |
-          # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
-          # exported in the root Makefile, so rootful builds produce /usr/… paths.
           make clean 2>/dev/null || true
-          make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+          make package \
+            THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+            SYSROOT=$THEOS/sdks/iPhoneOS16.5.sdk \
+            TARGET="iphone:clang:16.5:15.0" \
+            ARCHS="arm64 arm64e" \
             2>&1 | tee build-${{ matrix.label }}.log
-          # PIPESTATUS[0] is the make exit code; tee always exits 0
           exit ${PIPESTATUS[0]}
 
       - name: Stage debs
