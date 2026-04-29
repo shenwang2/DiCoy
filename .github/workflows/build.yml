@@ -46,16 +46,6 @@ jobs:
           tar -xf iPhoneOS16.5.sdk.tar.xz -C $THEOS/sdks/
           rm *.tar.xz
 
-      # -----------------------------------------------------------------------
-      # INJECT MISSING IOSURFACE HEADERS
-      # -----------------------------------------------------------------------
-      - name: Patch IOSurface Headers
-        run: |
-          # Copy the full macOS IOSurface headers into the Theos vendor includes
-          mkdir -p $THEOS/vendor/include/IOSurface
-          MACOS_SDK=$(xcrun --show-sdk-path --sdk macosx)
-          cp -r "$MACOS_SDK/System/Library/Frameworks/IOSurface.framework/Headers/"* $THEOS/vendor/include/IOSurface/
-
       - name: Build (${{ matrix.label }})
         run: |
           # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
