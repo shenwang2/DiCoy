@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 TOOL_NAME = DiCoyDaemon
 
 DiCoyDaemon_FILES      = main.m
-DiCoyDaemon_FRAMEWORKS = Foundation IOSurface CoreGraphics CoreFoundation UIKit
+DiCoyDaemon_FRAMEWORKS = Foundation IOSurface CoreGraphics CoreFoundation
 DiCoyDaemon_LDFLAGS    = -framework IOKit
 DiCoyDaemon_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)
 
