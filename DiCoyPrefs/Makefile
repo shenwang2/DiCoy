@@ -6,7 +6,8 @@ include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = DiCoyPrefs
 
 DiCoyPrefs_FILES      = DiCoyPrefsListController.m
-DiCoyPrefs_FRAMEWORKS = Foundation UIKit Preferences
+DiCoyPrefs_FRAMEWORKS         = Foundation UIKit
+DiCoyPrefs_PRIVATE_FRAMEWORKS = Preferences
 
 DiCoyPrefs_CFLAGS     = -fobjc-arc
 
