@@ -8,9 +8,6 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-env:
-  THEOS: ${{ github.workspace }}/theos
-
 jobs:
   # -----------------------------------------------------------------------
   # Matrix: rootless (Dopamine / palera1n rootless) + rootful (checkra1n etc.)
@@ -31,15 +28,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cache the Theos tree and SDKs — invalidated by Makefile changes
-      - name: Cache Theos
-        id: cache-theos
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/theos
-          key: theos-${{ runner.os }}-${{ hashFiles('Makefile', 'DiCoyDaemon/Makefile', 'DiCoyTweak/Makefile', 'DiCoyPrefs/Makefile') }}
-          restore-keys: theos-${{ runner.os }}-
-
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -47,18 +35,15 @@ jobs:
             build-essential curl git make perl python3 \
             zip unzip libplist-utils fakeroot
 
-      - name: Install Theos
-        if: steps.cache-theos.outputs.cache-hit != 'true'
-        run: |
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          # Download iOS 15–17 SDKs from the Theos SDK repo
-          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz \
-            | tar -xz -C "$THEOS/sdks" --strip-components=1
+      # theosdev/theos-action clones Theos, downloads SDKs, downloads the
+      # Linux clang toolchain, and sets $THEOS for all subsequent steps.
+      - name: Setup Theos
+        uses: theosdev/theos-action@v1
+        with:
+          cache: true
 
       - name: Build (${{ matrix.label }})
         run: |
-          # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
-          # exported in the root Makefile, so rootful builds produce /usr/… paths.
           make clean 2>/dev/null || true
           make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
             2>&1 | tee build-${{ matrix.label }}.log
