@@ -77,16 +77,27 @@ jobs:
           path: build-${{ matrix.label }}.log
 
   # -----------------------------------------------------------------------
-  # Create a draft GitHub Release with both debs when a version tag is pushed
+  # Publish a GitHub Release on every push to main/master (not PRs).
+  # The version in the control file is used as the tag; pushing the same
+  # version updates the existing release in place.
   # -----------------------------------------------------------------------
   release:
     name: GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'pull_request'
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        run: |
+          VERSION=$(grep -i '^Version:' control | awk '{print $2}')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -94,17 +105,17 @@ jobs:
           pattern: DiCoy-*
           merge-multiple: true
 
-      - name: Create release
+      - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: DiCoy ${{ github.ref_name }}
-          draft: true
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: DiCoy v${{ steps.ver.outputs.version }}
+          draft: false
           files: release-artifacts/*.deb
           body: |
             ## Installation
 
-            Download the `.deb` that matches your jailbreak and install it via your package manager (Sileo, Zebra) or Filza.
+            Download the `.deb` that matches your jailbreak and install via your package manager (Sileo, Zebra) or Filza.
 
             | File | iOS | Jailbreak |
             |------|-----|-----------|
