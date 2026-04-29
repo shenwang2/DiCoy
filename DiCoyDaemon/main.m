@@ -9,8 +9,9 @@
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <UIKit/UIKit.h>
+#import <IOKit/IOReturn.h>
 #import <mach/mach.h>
-#import <mach/bootstrap.h>
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <sys/stat.h>
@@ -18,6 +19,9 @@
 #import <signal.h>
 #import <unistd.h>
 #import <os/log.h>
+
+// bootstrap_look_up is not declared in the iOS SDK's mach/bootstrap.h
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
 
 #import "DiCoyProtocol.h"
 
@@ -123,14 +127,10 @@ int main(int argc, char *argv[]) {
         // is stdin, so we must explicitly set all fds to the sentinel -1).
         for (int i = 0; i < MAX_CLIENTS; i++) gClients[i].fd = -1;
 
-        // Query display size from CoreGraphics.
-        // CGMainDisplayID() == 0 on iOS (only one display).
-        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-        if (mode) {
-            gDisplayW = (CGFloat)CGDisplayModeGetWidth(mode);
-            gDisplayH = (CGFloat)CGDisplayModeGetHeight(mode);
-            CGDisplayModeRelease(mode);
-        }
+        // Query native display resolution in physical pixels.
+        CGRect nb = [UIScreen mainScreen].nativeBounds;
+        gDisplayW = nb.size.width;
+        gDisplayH = nb.size.height;
         if (gDisplayW == 0) {
             // Hard-coded fallback (iPhone 12 Pro physical resolution).
             gDisplayW = 1170; gDisplayH = 2532;
