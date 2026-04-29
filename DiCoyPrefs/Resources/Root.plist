@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>title</key>
+    <string>DiCoy</string>
+    <key>items</key>
+    <array>
+
+        <!-- ============================================================ -->
+        <!-- Mode selection                                                -->
+        <!-- ============================================================ -->
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>Camera Feed Mode</string>
+            <key>footerText</key>
+            <string>Screen Mirror replaces the camera with a live capture of the device display. Media Inject plays a local video or image file instead.</string>
+        </dict>
+
+        <!-- PSSegmentCell presents a segmented control (Off / Screen Mirror / Media Inject). -->
+        <!-- "PostNotification" causes PSListController to call notify_post() automatically  -->
+        <!-- whenever the value changes, so connected tweaks reconfigure in real time.        -->
+        <dict>
+            <key>cell</key>
+            <string>PSSegmentCell</string>
+            <key>label</key>
+            <string>Mode</string>
+            <key>key</key>
+            <string>mode</string>
+            <key>default</key>
+            <string>off</string>
+            <key>defaults</key>
+            <string>com.dicoy.prefs</string>
+            <key>PostNotification</key>
+            <string>com.dicoy.modeChanged</string>
+            <key>values</key>
+            <array>
+                <string>off</string>
+                <string>screenMirror</string>
+                <string>mediaInject</string>
+            </array>
+            <key>titles</key>
+            <array>
+                <string>Off</string>
+                <string>Screen Mirror</string>
+                <string>Media Inject</string>
+            </array>
+        </dict>
+
+        <!-- ============================================================ -->
+        <!-- Media Injection settings                                      -->
+        <!-- ============================================================ -->
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>Media Injection</string>
+            <key>footerText</key>
+            <string>Absolute path to a .mp4, .mov, or image file on the device. The file is read directly from disk; no import needed.</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>
+            <string>PSEditTextCell</string>
+            <key>label</key>
+            <string>File Path</string>
+            <key>key</key>
+            <string>mediaFilePath</string>
+            <key>default</key>
+            <string></string>
+            <key>placeholder</key>
+            <string>/var/mobile/Media/DCIM/inject.mp4</string>
+            <key>defaults</key>
+            <string>com.dicoy.prefs</string>
+            <key>PostNotification</key>
+            <string>com.dicoy.modeChanged</string>
+            <key>keyboardType</key>
+            <integer>0</integer>
+        </dict>
+
+        <!-- ============================================================ -->
+        <!-- Capture settings                                              -->
+        <!-- ============================================================ -->
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>Capture Settings</string>
+            <key>footerText</key>
+            <string>60 FPS increases fidelity but raises CPU and battery usage. Requires restarting the camera app to take effect.</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>
+            <string>PSSegmentCell</string>
+            <key>label</key>
+            <string>Frame Rate</string>
+            <key>key</key>
+            <string>fps</string>
+            <key>default</key>
+            <string>30</string>
+            <key>defaults</key>
+            <string>com.dicoy.prefs</string>
+            <key>values</key>
+            <array>
+                <string>30</string>
+                <string>60</string>
+            </array>
+            <key>titles</key>
+            <array>
+                <string>30 FPS</string>
+                <string>60 FPS</string>
+            </array>
+        </dict>
+
+    </array>
+</dict>
+</plist>
