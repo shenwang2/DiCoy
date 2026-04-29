@@ -8,6 +8,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  THEOS: ${{ github.workspace }}/theos
+
 jobs:
   # -----------------------------------------------------------------------
   # Matrix: rootless (Dopamine / palera1n rootless) + rootful (checkra1n etc.)
@@ -35,15 +38,38 @@ jobs:
             build-essential curl git make perl python3 \
             zip unzip libplist-utils fakeroot
 
-      # theosdev/theos-action clones Theos, downloads SDKs, downloads the
-      # Linux clang toolchain, and sets $THEOS for all subsequent steps.
-      - name: Setup Theos
-        uses: theosdev/theos-action@v1
+      # Cache Theos tree, SDKs, and toolchain together.
+      # Key covers Makefile changes; restore-keys allow a partial hit on a
+      # prior run (toolchain + SDKs stay cached even if Makefiles change).
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
         with:
-          cache: true
+          path: ${{ github.workspace }}/theos
+          key: theos-${{ runner.os }}-${{ hashFiles('Makefile', 'DiCoyDaemon/Makefile', 'DiCoyTweak/Makefile', 'DiCoyPrefs/Makefile') }}
+          restore-keys: theos-${{ runner.os }}-
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
+          # iOS 15–17 SDKs
+          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz \
+            | tar -xz -C "$THEOS/sdks" --strip-components=1
+
+          # Cross-compilation toolchain: provides clang/clang++ targeting
+          # arm64-apple-ios and a Darwin-capable linker.  Extracts into
+          # $THEOS/toolchain/linux/iphone/ which is exactly where Theos
+          # expects $THEOS/toolchain/linux/iphone/bin/clang to live.
+          curl -fsSL \
+            https://github.com/nicowillis/swift-toolchain-linux/releases/latest/download/toolchain.tar.xz \
+            | tar -xJf - -C "$THEOS/toolchain"
 
       - name: Build (${{ matrix.label }})
         run: |
+          # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
+          # exported in the root Makefile, so rootful builds produce /usr/… paths.
           make clean 2>/dev/null || true
           make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
             2>&1 | tee build-${{ matrix.label }}.log
