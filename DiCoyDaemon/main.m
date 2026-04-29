@@ -7,8 +7,9 @@
 // IOSurfaceLookup() to map the same GPU memory without any memcpy.
 
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurfaceRef.h>
+#import <IOSurface/IOSurface.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import <mach/bootstrap.h>
 #import <sys/socket.h>
@@ -123,14 +124,10 @@ int main(int argc, char *argv[]) {
         // is stdin, so we must explicitly set all fds to the sentinel -1).
         for (int i = 0; i < MAX_CLIENTS; i++) gClients[i].fd = -1;
 
-        // Query display size from CoreGraphics.
-        // CGMainDisplayID() == 0 on iOS (only one display).
-        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-        if (mode) {
-            gDisplayW = (CGFloat)CGDisplayModeGetWidth(mode);
-            gDisplayH = (CGFloat)CGDisplayModeGetHeight(mode);
-            CGDisplayModeRelease(mode);
-        }
+        // Query native display resolution in physical pixels.
+        CGRect nativeBounds = [UIScreen mainScreen].nativeBounds;
+        gDisplayW = nativeBounds.size.width;
+        gDisplayH = nativeBounds.size.height;
         if (gDisplayW == 0) {
             // Hard-coded fallback (iPhone 12 Pro physical resolution).
             gDisplayW = 1170; gDisplayH = 2532;
