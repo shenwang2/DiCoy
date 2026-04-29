@@ -7,7 +7,7 @@
 // IOSurfaceLookup() to map the same GPU memory without any memcpy.
 
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <mach/mach.h>
 #import <mach/bootstrap.h>
