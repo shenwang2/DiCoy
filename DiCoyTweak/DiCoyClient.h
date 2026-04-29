@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import "DiCoyProtocol.h"
 
 // Called on a private serial queue each time the daemon delivers a new frame.
