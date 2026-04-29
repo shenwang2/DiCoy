@@ -110,7 +110,7 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: DiCoy v${{ steps.ver.outputs.version }}
-          draft: false
+          draft: true
           files: release-artifacts/*.deb
           body: |
             ## Installation
