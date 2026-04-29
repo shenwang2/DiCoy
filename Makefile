@@ -10,27 +10,22 @@ SUBPROJECTS += DiCoyPrefs
 include $(THEOS)/makefiles/aggregate.mk
 
 # -----------------------------------------------------------------------
-# Rootless vs rootful layout paths.  These mirror the per-subproject
-# variables so the root before-package:: works for both schemes.
-# Subproject before-package:: hooks run only when building a subproject
-# directly (make -C DiCoyPrefs); root-level make package only fires the
-# hook defined here.
+# Stage supplementary files (PreferenceLoader entry, launchd plist) that
+# are not handled by Theos's binary install machinery.
+#
+# internal-stage:: runs during the staging phase and writes directly into
+# $(THEOS_STAGING_DIR), which is what dpkg-deb packages.  before-package::
+# fires after layout/ has already been copied into staging, so any files
+# written there at that point are too late — they never reach the deb.
 # -----------------------------------------------------------------------
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-  JB_PREFIX             = /var/jb
-  _PREFLOADER_LAYOUT    = var/jb/Library/PreferenceLoader/Preferences
-  _LAUNCHDAEMONS_LAYOUT = var/jb/Library/LaunchDaemons
+  JB_PREFIX = /var/jb
 else
-  JB_PREFIX             =
-  _PREFLOADER_LAYOUT    = Library/PreferenceLoader/Preferences
-  _LAUNCHDAEMONS_LAYOUT = Library/LaunchDaemons
+  JB_PREFIX =
 endif
 
-before-package::
-	mkdir -p $(THEOS_PROJECT_DIR)/layout/$(_PREFLOADER_LAYOUT)
-	cp $(THEOS_PROJECT_DIR)/DiCoyPrefs/entry.plist \
-	    $(THEOS_PROJECT_DIR)/layout/$(_PREFLOADER_LAYOUT)/DiCoy.plist
-	mkdir -p $(THEOS_PROJECT_DIR)/layout/$(_LAUNCHDAEMONS_LAYOUT)
-	sed 's|%%JB_PREFIX%%|$(JB_PREFIX)|g' \
-	    $(THEOS_PROJECT_DIR)/DiCoyDaemon/com.dicoy.daemon.plist.in \
-	    > $(THEOS_PROJECT_DIR)/layout/$(_LAUNCHDAEMONS_LAYOUT)/com.dicoy.daemon.plist
+internal-stage::
+	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)$(JB_PREFIX)/Library/PreferenceLoader/Preferences$(ECHO_END)
+	$(ECHO_NOTHING)cp $(THEOS_PROJECT_DIR)/DiCoyPrefs/entry.plist $(THEOS_STAGING_DIR)$(JB_PREFIX)/Library/PreferenceLoader/Preferences/DiCoy.plist$(ECHO_END)
+	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)$(JB_PREFIX)/Library/LaunchDaemons$(ECHO_END)
+	$(ECHO_NOTHING)sed 's|%%JB_PREFIX%%|$(JB_PREFIX)|g' $(THEOS_PROJECT_DIR)/DiCoyDaemon/com.dicoy.daemon.plist.in > $(THEOS_STAGING_DIR)$(JB_PREFIX)/Library/LaunchDaemons/com.dicoy.daemon.plist$(ECHO_END)
