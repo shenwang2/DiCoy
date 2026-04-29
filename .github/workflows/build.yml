@@ -1,1 +1,112 @@
+name: Build DiCoy
 
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Matrix: rootless (Dopamine / palera1n rootless) + rootful (checkra1n etc.)
+  # -----------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: rootless
+            scheme: rootless
+          - label: rootful
+            scheme: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Cache the Theos tree and SDKs — invalidated by Makefile changes
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-${{ runner.os }}-${{ hashFiles('Makefile', 'DiCoyDaemon/Makefile', 'DiCoyTweak/Makefile', 'DiCoyPrefs/Makefile') }}
+          restore-keys: theos-${{ runner.os }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl git make perl python3 \
+            zip unzip libplist-utils fakeroot
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          # Download iOS 15–17 SDKs from the Theos SDK repo
+          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz \
+            | tar -xz -C "$THEOS/sdks" --strip-components=1
+
+      - name: Build (${{ matrix.label }})
+        run: |
+          # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
+          # exported in the root Makefile, so rootful builds produce /usr/… paths.
+          make clean 2>/dev/null || true
+          make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+            2>&1 | tee build-${{ matrix.label }}.log
+          # PIPESTATUS[0] is the make exit code; tee always exits 0
+          exit ${PIPESTATUS[0]}
+
+      - name: Stage debs
+        run: |
+          mkdir -p dist
+          for f in packages/*.deb; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f" .deb)
+            cp "$f" "dist/${base}_${{ matrix.label }}.deb"
+          done
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiCoy-${{ matrix.label }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.label }}
+          path: build-${{ matrix.label }}.log
+
+  # -----------------------------------------------------------------------
+  # Create a GitHub Release with both debs when a version tag is pushed
+  # -----------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: DiCoy-*
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**/*.deb
+          generate_release_notes: true
