@@ -38,9 +38,7 @@ jobs:
             build-essential curl git make perl python3 \
             zip unzip libplist-utils fakeroot
 
-      # Cache Theos tree, SDKs, and toolchain together.
-      # Key covers Makefile changes; restore-keys allow a partial hit on a
-      # prior run (toolchain + SDKs stay cached even if Makefiles change).
+      # Cache the full Theos tree (repo + SDKs + toolchain + ldid).
       - name: Cache Theos
         id: cache-theos
         uses: actions/cache@v4
@@ -58,13 +56,21 @@ jobs:
           curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz \
             | tar -xz -C "$THEOS/sdks" --strip-components=1
 
-          # Cross-compilation toolchain: provides clang/clang++ targeting
-          # arm64-apple-ios and a Darwin-capable linker.  Extracts into
-          # $THEOS/toolchain/linux/iphone/ which is exactly where Theos
-          # expects $THEOS/toolchain/linux/iphone/bin/clang to live.
+          # iOS cross-compilation toolchain for Linux.
+          # kabiroberai/swift-toolchain-linux is the current live source;
+          # the archive contains toolchain/linux/iphone/… at its top level,
+          # so we extract to $THEOS to land at $THEOS/toolchain/linux/iphone/.
           curl -fsSL \
-            https://github.com/nicowillis/swift-toolchain-linux/releases/latest/download/toolchain.tar.xz \
-            | tar -xJf - -C "$THEOS/toolchain"
+            https://github.com/kabiroberai/swift-toolchain-linux/releases/latest/download/toolchain-linux.tar.gz \
+            | tar -xzf - -C "$THEOS"
+
+          # ldid – pseudo-codesigning tool required by Theos on Linux to
+          # fake-sign Mach-O binaries for jailbreak distribution.
+          # Theos looks for it at $THEOS/bin/ldid.
+          curl -fsSL \
+            https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64 \
+            -o "$THEOS/bin/ldid"
+          chmod +x "$THEOS/bin/ldid"
 
       - name: Build (${{ matrix.label }})
         run: |
