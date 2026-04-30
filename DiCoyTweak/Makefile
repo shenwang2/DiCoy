@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = DiCoyTweak
 
 DiCoyTweak_FILES      = Tweak.x DiCoyClient.m
-DiCoyTweak_FRAMEWORKS = Foundation AVFoundation CoreMedia CoreVideo IOSurface \
+DiCoyTweak_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo IOSurface \
                         QuartzCore CoreFoundation AudioToolbox
 DiCoyTweak_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)
 
