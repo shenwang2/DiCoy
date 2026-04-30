@@ -13,7 +13,6 @@
 #import "DiCoyProtocol.h"
 
 static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
-static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 
 // =========================================================================
 // DiCoyTweakManager
@@ -505,22 +504,17 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
     if (objc_getAssociatedObject(self, kDiCoyDisplayLayerKey)) return;
 
     AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer new];
-    CALayer *maskLayer = [CALayer layer];
-    maskLayer.backgroundColor = [UIColor blackColor].CGColor;
-    maskLayer.opacity  = 0.0f;
+    // Start invisible — opacity is raised to 1.0 only when a real frame is
+    // successfully enqueued. No mask layer: without content the display layer
+    // is fully transparent, so the real camera preview shows through unobstructed.
     displayLayer.opacity = 0.0f;
-
-    [self insertSublayer:maskLayer    above:layer];
-    [self insertSublayer:displayLayer above:maskLayer];
+    [self insertSublayer:displayLayer above:layer];
 
     objc_setAssociatedObject(self, kDiCoyDisplayLayerKey, displayLayer,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(self, kDiCoyMaskLayerKey,    maskLayer,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     dispatch_async(dispatch_get_main_queue(), ^{
         displayLayer.frame = self.bounds;
-        maskLayer.frame    = self.bounds;
     });
 
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self
@@ -531,26 +525,26 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 %new
 - (void)dicoyStep:(CADisplayLink *)sender {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-    BOOL active = mgr.active;
-
     AVSampleBufferDisplayLayer *dLayer =
         objc_getAssociatedObject(self, kDiCoyDisplayLayerKey);
-    CALayer *mLayer =
-        objc_getAssociatedObject(self, kDiCoyMaskLayerKey);
+    if (!dLayer) return;
 
-    dLayer.opacity = active ? 1.0f : 0.0f;
-    mLayer.opacity = active ? 1.0f : 0.0f;
-    if (!active || !dLayer || !dLayer.readyForMoreMediaData) return;
+    if (!mgr.active) {
+        dLayer.opacity = 0.0f;
+        return;
+    }
 
     dLayer.frame = self.bounds;
 
     static CFTimeInterval lastRefresh = 0;
     CFTimeInterval now = CACurrentMediaTime();
     if (now - lastRefresh < 1.0 / DICOY_TARGET_FPS) return;
+    if (!dLayer.readyForMoreMediaData) return;
     lastRefresh = now;
 
     CMSampleBufferRef frame = [mgr buildSampleBufferMatchingBuffer:nil];
     if (frame) {
+        dLayer.opacity = 1.0f;
         [dLayer flush];
         [dLayer enqueueSampleBuffer:frame];
         CFRelease(frame);
