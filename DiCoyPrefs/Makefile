@@ -16,14 +16,18 @@ DiCoyPrefs_RESOURCE_DIRS = Resources
 # --------------------------------------------------------------------------
 # Rootless vs rootful install paths
 # --------------------------------------------------------------------------
+# Theos rootless mode (THEOS_PACKAGE_SCHEME=rootless) auto-prepends /var/jb to
+# all INSTALL_PATH values.  Do NOT include /var/jb here or the bundle lands at
+# /var/jb/var/jb/Library/PreferenceBundles/ (double-prefix) and PreferenceLoader
+# cannot find it.
+DiCoyPrefs_INSTALL_PATH = /Library/PreferenceBundles
+
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-  DiCoyPrefs_INSTALL_PATH = /var/jb/Library/PreferenceBundles
-  _PREFLOADER_LAYOUT      = var/jb/Library/PreferenceLoader/Preferences
-  JB_PREFIX               = /var/jb
+  _PREFLOADER_LAYOUT = var/jb/Library/PreferenceLoader/Preferences
+  JB_PREFIX          = /var/jb
 else
-  DiCoyPrefs_INSTALL_PATH = /Library/PreferenceBundles
-  _PREFLOADER_LAYOUT      = Library/PreferenceLoader/Preferences
-  JB_PREFIX               =
+  _PREFLOADER_LAYOUT = Library/PreferenceLoader/Preferences
+  JB_PREFIX          =
 endif
 
 # Stage the PreferenceLoader entry plist so it is included in the .deb.
