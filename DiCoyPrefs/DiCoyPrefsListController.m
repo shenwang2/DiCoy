@@ -7,8 +7,7 @@
 // to CFPreferences, which stores the value in-memory but may never write the
 // .plist file. The tweak reads the file directly, so we force-write it here
 // on every preference change.
-static NSString *const kPrefsPlistPath =
-    @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist";
+static NSString *const kPrefsPlistPath = @"/var/tmp/com.dicoy.prefs.plist";
 
 @implementation DiCoyPrefsListController
 
