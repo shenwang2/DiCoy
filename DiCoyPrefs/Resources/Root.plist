@@ -26,26 +26,22 @@
             <key>cell</key>
             <string>PSSegmentedCell</string>
             <key>label</key>
-            <string>Mode</string>
+            <string>Frame Rate</string>
             <key>key</key>
-            <string>mode</string>
+            <string>fps</string>
             <key>default</key>
-            <string>off</string>
+            <string>30</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
-            <key>PostNotification</key>
-            <string>com.dicoy.modeChanged</string>
-            <key>values</key>
+            <key>validValues</key>
             <array>
-                <string>off</string>
-                <string>screenMirror</string>
-                <string>mediaInject</string>
+                <string>30</string>
+                <string>60</string>
             </array>
-            <key>titles</key>
+            <key>validTitles</key>
             <array>
-                <string>Off</string>
-                <string>Screen Mirror</string>
-                <string>Media Inject</string>
+                <string>30 FPS</string>
+                <string>60 FPS</string>
             </array>
         </dict>
 
