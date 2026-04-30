@@ -3,26 +3,6 @@
 // Logos hooks that intercept AVFoundation's camera and microphone pipelines
 // and substitute injected content sourced from DiCoyDaemon (screen mirror)
 // or a local media file (media injection mode).
-//
-// Injection architecture overview:
-//
-//   App code calls:
-//     [videoOutput setSampleBufferDelegate:realDelegate queue:q]
-//
-//   We intercept this and substitute our proxy:
-//     [videoOutput setSampleBufferDelegate:DiCoyVideoProxy queue:q]
-//
-//   When the real camera fires a frame, AVFoundation calls:
-//     [DiCoyVideoProxy captureOutput:output didOutputSampleBuffer:realBuf ...]
-//
-//   We build an injected CMSampleBufferRef from the latest IOSurface (screen
-//   mirror) or from an AVAssetReader (media inject) and call the app's real
-//   delegate with the injected buffer instead.
-//
-//   Audio injection (media inject mode): DiCoyAudioProxy reads audio samples
-//   from the media file via AVAssetReader, converts to the session's LPCM
-//   format (derived from the first real mic buffer), restamps to current
-//   time, and delivers in place of the real microphone buffer.
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -38,10 +18,6 @@
 
 // =========================================================================
 // DiCoyTweakManager (singleton)
-//
-// Owns the daemon connection, the most-recently received IOSurface (screen
-// mirror path), and AVAssetReader instances (media inject path).
-// All public entry points are thread-safe.
 // =========================================================================
 
 @interface DiCoyTweakManager : NSObject
@@ -49,22 +25,12 @@
 - (void)startMirroring;
 - (void)stopMirroring;
 
-// Builds a video CMSampleBufferRef. Screen mirror: IOSurface → CVPixelBuffer.
-// Media inject: AVAssetReader → restamped copy. Caller must CFRelease.
 - (CMSampleBufferRef)buildSampleBuffer CF_RETURNS_RETAINED;
-
-// Reads the next audio chunk from the inject file, converting to match asbd.
-// Lazily initialises the audio AVAssetReader on the first call.
-// Returns NULL in screen mirror mode or if no file/track exists. Caller must CFRelease.
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd CF_RETURNS_RETAINED;
-
-// Initialises (or re-initialises) the audio AVAssetReader. Called from
-// DiCoyAudioProxy on the first real mic callback once the ASBD is known.
 - (void)setupAudioReaderForPath:(NSString *)path matchingASBD:(const AudioStreamBasicDescription *)asbd;
 
 @property (nonatomic, strong)  DiCoyClient *client;
 @property (nonatomic, assign)  IOSurfaceRef latestSurface;
-// protected by _surfaceLock
 @property (nonatomic, assign)  uint16_t surfaceWidth;
 @property (nonatomic, assign)  uint16_t surfaceHeight;
 @property (nonatomic, assign)  BOOL active;
@@ -101,7 +67,6 @@
 
         __weak typeof(self) weak = self;
 
-        // Called on client's private read queue for each FRAME_READY from daemon.
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
             DiCoyTweakManager *strong = weak;
             if (!strong) return;
@@ -124,7 +89,6 @@
 - (void)startMirroring {
     if (self.active) return;
 
-    // Use CFPreferences to read values across the sandbox boundary
     CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
     NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
     if (!mode) mode = @"off";
@@ -140,8 +104,6 @@
         self.currentMediaPath = mediaPath ?: @"";
         
         [self setupVideoReaderForPath:self.currentMediaPath];
-        // Audio reader is lazily initialised on the first mic callback once
-        // the session's AudioStreamBasicDescription is known.
     } else {
         self.currentMode = kDicoyModeScreenMirror;
         if ([self.client connect]) {
@@ -174,10 +136,6 @@
 
 // =========================================================================
 // setupVideoReaderForPath:
-//
-// Creates an AVAssetReader that decodes video frames to 32BGRA, matching
-// the IOSurface pixel format used in screen mirror mode so downstream
-// AVFoundation processing sees the same format regardless of mode.
 // =========================================================================
 
 - (void)setupVideoReaderForPath:(NSString *)path {
@@ -192,8 +150,9 @@
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&err];
     if (!reader) return;
 
+    // FIX: Match the iOS default camera pixel format (YUV Bi-Planar)
     NSDictionary *settings = @{
-        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
     };
 
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
@@ -212,10 +171,6 @@
 
 // =========================================================================
 // setupAudioReaderForPath:matchingASBD:
-//
-// Creates an AVAssetReader that decodes audio to interleaved signed-integer
-// LPCM at the sample rate and channel count of the real microphone buffer.
-// Called lazily on the first mic callback so the session ASBD is known.
 // =========================================================================
 
 - (void)setupAudioReaderForPath:(NSString *)path
@@ -260,10 +215,6 @@
 
 // =========================================================================
 // nextVideoSampleBuffer
-//
-// Copies the next decoded BGRA video frame from the AVAssetReader, loops
-// the file on EOF, and restamps the PTS to CACurrentMediaTime() so
-// AVFoundation sees a monotonically-advancing live timestamp.
 // =========================================================================
 
 - (CMSampleBufferRef)nextVideoSampleBuffer {
@@ -275,7 +226,6 @@
     os_unfair_lock_unlock(&_videoReaderLock);
 
     if (!buf) {
-        // EOF, error, or reader not yet created — loop/reset.
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
 
@@ -292,7 +242,7 @@
 
     CMTime duration = CMSampleBufferGetDuration(buf);
     if (!CMTIME_IS_VALID(duration) || CMTIME_IS_INDEFINITE(duration)) {
-        duration = CMTimeMake(1, 30); // fallback: 30 FPS
+        duration = CMTimeMake(1, 30); 
     }
 
     CMSampleTimingInfo timing = {
@@ -305,15 +255,11 @@
     CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
     CFRelease(buf);
 
-    return restamped; // NULL on copy failure; caller CFRelease otherwise
+    return restamped;
 }
 
 // =========================================================================
 // nextAudioSampleBufferMatchingASBD:
-//
-// Reads the next LPCM chunk from the inject file. Lazily initialises the
-// reader on the first call (needs ASBD to configure output format). Loops
-// on EOF. Restamps PTS to match the camera clock.
 // =========================================================================
 
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd {
@@ -326,7 +272,6 @@
     os_unfair_lock_unlock(&_audioReaderLock);
 
     if (needsSetup || !buf) {
-        // Lazy init or EOF — set up / reset the reader.
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
 
@@ -361,9 +306,6 @@
 
 // =========================================================================
 // buildSampleBuffer
-//
-// Screen mirror: IOSurface → CVPixelBuffer → CMSampleBuffer (zero-copy IPC).
-// Media inject: delegates to nextVideoSampleBuffer (AVAssetReader, looping).
 // =========================================================================
 
 - (CMSampleBufferRef)buildSampleBuffer {
@@ -373,7 +315,6 @@
         return [self nextVideoSampleBuffer];
     }
 
-    // --- Screen mirror path ---
     os_unfair_lock_lock(&_surfaceLock);
     IOSurfaceRef surface = self.latestSurface;
     uint16_t w = self.surfaceWidth;
@@ -429,10 +370,6 @@
 
 // =========================================================================
 // DiCoyVideoProxy
-//
-// Drop-in replacement for the app's AVCaptureVideoDataOutputSampleBufferDelegate.
-// Injects our synthesised buffer; falls through to the real camera buffer
-// when DiCoy is inactive or no frame has arrived yet.
 // =========================================================================
 
 @interface DiCoyVideoProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
@@ -445,17 +382,27 @@
   didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          fromConnection:(AVCaptureConnection *)connection {
 
-    CMSampleBufferRef injected = [[DiCoyTweakManager sharedManager] buildSampleBuffer];
+    DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+    CMSampleBufferRef injected = [mgr buildSampleBuffer];
 
     if (injected) {
+        // Success! Deliver the fake frame.
         [self.realDelegate captureOutput:output
                    didOutputSampleBuffer:injected
                           fromConnection:connection];
         CFRelease(injected);
     } else {
-        [self.realDelegate captureOutput:output
-                   didOutputSampleBuffer:sampleBuffer
-                          fromConnection:connection];
+        if (mgr.active) {
+            // DIAGNOSTIC FREEZE: The tweak is ON, but we failed to get a frame 
+            // (Sandbox blocked the file, or path is wrong).
+            // We intentionally DO NOT call the real delegate. 
+            // The camera viewfinder will freeze, proving the tweak is alive!
+        } else {
+            // Tweak is OFF. Behave normally.
+            [self.realDelegate captureOutput:output
+                       didOutputSampleBuffer:sampleBuffer
+                              fromConnection:connection];
+        }
     }
 }
 
@@ -480,14 +427,6 @@
 
 // =========================================================================
 // DiCoyAudioProxy
-//
-// Screen mirror mode: pass-through. System audio capture would require a
-// separate AudioServicesCreateRecordingAudioTap daemon-side implementation.
-//
-// Media inject mode: reads audio from the inject file via AVAssetReader,
-// converts to interleaved 16-bit LPCM at the session's sample rate and
-// channel count (derived from the first real mic buffer), restamps to
-// current time, and delivers instead of the mic buffer.
 // =========================================================================
 
 @interface DiCoyAudioProxy : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
@@ -518,7 +457,6 @@
         }
     }
 
-    // Screen mirror mode or no injected audio available — pass through mic.
     [self.realDelegate captureOutput:output
                didOutputSampleBuffer:sampleBuffer
                       fromConnection:connection];
@@ -535,7 +473,6 @@
 // Logos hooks
 // =========================================================================
 
-// Keys for the Objective-C runtime to store our proxies
 static const void *kDiCoyVideoProxyKey = &kDiCoyVideoProxyKey;
 static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
 
@@ -566,7 +503,6 @@ static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
         
         %orig(proxy, queue);
     } else if (!delegate) {
-        // If the app sets the delegate to nil, destroy our proxy
         objc_setAssociatedObject(self, kDiCoyVideoProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         %orig;
     } else {
@@ -589,7 +525,6 @@ static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
         
         %orig(proxy, queue);
     } else if (!delegate) {
-        // If the app sets the delegate to nil, destroy our proxy
         objc_setAssociatedObject(self, kDiCoyAudioProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         %orig;
     } else {
@@ -608,7 +543,6 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
                                  CFDictionaryRef userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
 
-    // Use CFPreferences to read values across the sandbox boundary
     CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
     NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
     if (!mode) mode = @"off";
@@ -616,13 +550,9 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
     if ([mode isEqualToString:@"off"]) {
         if (mgr.active) [mgr stopMirroring];
     } else if (mgr.active) {
-        // Mode switched between screenMirror and mediaInject while a session
-        // is live — restart so the new source takes effect immediately.
         [mgr stopMirroring];
         [mgr startMirroring];
     }
-    // If no session is running (mgr.active == NO), startMirroring fires
-    // naturally on the next AVCaptureSession -startRunning.
 }
 
 %ctor {
