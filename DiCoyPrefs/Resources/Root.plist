@@ -18,7 +18,7 @@
 
         <dict>
             <key>cell</key>
-            <string>PSSegmentedCell</string>
+            <string>PSSegmentCell</string>
             <key>label</key>
             <string>Mode</string>
             <key>key</key>
@@ -82,7 +82,7 @@
 
         <dict>
             <key>cell</key>
-            <string>PSSegmentedCell</string>
+            <string>PSSegmentCell</string>
             <key>label</key>
             <string>Frame Rate</string>
             <key>key</key>
