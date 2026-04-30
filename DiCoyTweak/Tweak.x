@@ -433,6 +433,124 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 %end
 
 
+// =========================================================================
+// Photo output hook — still captures via AVCapturePhotoOutput bypass the
+// AVCaptureVideoDataOutput delegate entirely.  We MSHookMessageEx the photo
+// delegate's -captureOutput:didFinishProcessingPhoto:error: and, the first
+// time it fires, also hook the concrete AVCapturePhoto class methods that
+// Camera.app calls to retrieve pixel/file data before saving.
+// =========================================================================
+
+%hook AVCapturePhotoOutput
+
+- (void)capturePhotoWithSettings:(AVCapturePhotoSettings *)settings
+                        delegate:(id<AVCapturePhotoCaptureDelegate>)delegate {
+    if (!settings || !delegate) return %orig;
+    static NSMutableSet *hookedClasses;
+    static dispatch_once_t photoOnce;
+    dispatch_once(&photoOnce, ^{ hookedClasses = [NSMutableSet new]; });
+    NSString *clsName = NSStringFromClass([delegate class]);
+    @synchronized(hookedClasses) {
+        if (![hookedClasses containsObject:clsName]) {
+            [hookedClasses addObject:clsName];
+            __block void (*origPhoto)(id, SEL, AVCapturePhotoOutput *,
+                                      AVCapturePhoto *, NSError *) = nil;
+            MSHookMessageEx(
+                [delegate class],
+                @selector(captureOutput:didFinishProcessingPhoto:error:),
+                imp_implementationWithBlock(^(id blockSelf,
+                                              AVCapturePhotoOutput *captureOutput,
+                                              AVCapturePhoto *photo,
+                                              NSError *error) {
+                    DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+                    if (mgr.active) {
+                        // Static slots updated on every capture; read by the
+                        // AVCapturePhoto method hooks below.
+                        static NSData       *sJpegData = nil;
+                        static CVPixelBufferRef sInjPix = nil;
+
+                        // Build a synthetic origin buffer matching the photo's
+                        // pixel format so _nextVideoFrameForOrigin: picks the
+                        // right AVAssetReaderTrackOutput.
+                        CVPixelBufferRef photoPixel = photo.pixelBuffer;
+                        CMSampleBufferRef synthetic  = nil;
+                        if (photoPixel) {
+                            CMVideoFormatDescriptionRef fd = nil;
+                            if (CMVideoFormatDescriptionCreateForImageBuffer(
+                                    kCFAllocatorDefault, photoPixel, &fd) == noErr) {
+                                CMSampleTimingInfo t = {kCMTimeInvalid, kCMTimeZero,
+                                                        kCMTimeInvalid};
+                                CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
+                                    photoPixel, true, nil, nil, fd, &t, &synthetic);
+                                CFRelease(fd);
+                            }
+                        }
+                        CMSampleBufferRef injected = [mgr buildSampleBufferMatchingBuffer:synthetic];
+                        if (synthetic) CFRelease(synthetic);
+
+                        if (injected) {
+                            CVImageBufferRef injPix = CMSampleBufferGetImageBuffer(injected);
+                            if (injPix) {
+                                // Swap static pixel buffer slot (CF-managed).
+                                CVPixelBufferRef old = sInjPix;
+                                sInjPix = (CVPixelBufferRef)CFRetain(injPix);
+                                if (old) CFRelease(old);
+                                // Build JPEG for file-data path.
+                                CIImage  *ci = [CIImage imageWithCVImageBuffer:injPix];
+                                UIImage  *ui = [UIImage imageWithCIImage:ci scale:1.0
+                                                            orientation:UIImageOrientationUp];
+                                sJpegData = UIImageJPEGRepresentation(ui, 0.95);
+                            }
+                            CFRelease(injected);
+
+                            // Hook AVCapturePhoto methods on the concrete class once.
+                            static BOOL photoClassHooked = NO;
+                            if (!photoClassHooked && sInjPix) {
+                                photoClassHooked = YES;
+
+                                __block NSData *(*origFDR)(id, SEL) = nil;
+                                MSHookMessageEx([photo class],
+                                    @selector(fileDataRepresentation),
+                                    imp_implementationWithBlock(^NSData *(id s) {
+                                        DiCoyTweakManager *m = [DiCoyTweakManager sharedManager];
+                                        if (m.active && sJpegData) return sJpegData;
+                                        return origFDR(s, @selector(fileDataRepresentation));
+                                    }), (IMP *)&origFDR);
+
+                                __block NSData *(*origFDRCust)(id, SEL, id) = nil;
+                                MSHookMessageEx([photo class],
+                                    @selector(fileDataRepresentationWithCustomizer:),
+                                    imp_implementationWithBlock(^NSData *(id s, id c) {
+                                        DiCoyTweakManager *m = [DiCoyTweakManager sharedManager];
+                                        if (m.active && sJpegData) return sJpegData;
+                                        return origFDRCust(s,
+                                            @selector(fileDataRepresentationWithCustomizer:), c);
+                                    }), (IMP *)&origFDRCust);
+
+                                __block CVPixelBufferRef (*origPB)(id, SEL) = nil;
+                                MSHookMessageEx([photo class],
+                                    @selector(pixelBuffer),
+                                    imp_implementationWithBlock(^CVPixelBufferRef(id s) {
+                                        DiCoyTweakManager *m = [DiCoyTweakManager sharedManager];
+                                        if (m.active && sInjPix) return sInjPix;
+                                        return origPB(s, @selector(pixelBuffer));
+                                    }), (IMP *)&origPB);
+                            }
+                        }
+                    }
+                    origPhoto(blockSelf,
+                              @selector(captureOutput:didFinishProcessingPhoto:error:),
+                              captureOutput, photo, error);
+                }),
+                (IMP *)&origPhoto);
+        }
+    }
+    %orig;
+}
+
+%end
+
+
 // Same pattern for the AUDIO delegate.
 %hook AVCaptureAudioDataOutput
 
