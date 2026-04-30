@@ -89,9 +89,8 @@
 - (void)startMirroring {
     if (self.active) return;
 
-    CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
-    NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
-    if (!mode) mode = @"off";
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
+    NSString *mode = prefs[@"mode"] ?: @"off";
 
     if ([mode isEqualToString:@"off"]) return;
 
@@ -99,10 +98,7 @@
 
     if ([mode isEqualToString:@"mediaInject"]) {
         self.currentMode = kDicoyModeMediaInject;
-
-        NSString *mediaPath = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mediaFilePath"), CFSTR("com.dicoy.prefs"));
-        self.currentMediaPath = mediaPath ?: @"";
-        
+        self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
         [self setupVideoReaderForPath:self.currentMediaPath];
     } else {
         self.currentMode = kDicoyModeScreenMirror;
@@ -543,9 +539,8 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
                                  CFDictionaryRef userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
 
-    CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
-    NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
-    if (!mode) mode = @"off";
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
+    NSString *mode = prefs[@"mode"] ?: @"off";
 
     if ([mode isEqualToString:@"off"]) {
         if (mgr.active) [mgr stopMirroring];
