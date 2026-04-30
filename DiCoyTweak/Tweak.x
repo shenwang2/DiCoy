@@ -1,8 +1,4 @@
 // DiCoyTweak/Tweak.x
-//
-// Logos hooks that intercept AVFoundation's camera and microphone pipelines
-// and substitute injected content sourced from DiCoyDaemon (screen mirror)
-// or a local media file (media injection mode).
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -24,7 +20,6 @@
 + (instancetype)sharedManager;
 - (void)startMirroring;
 - (void)stopMirroring;
-
 - (CMSampleBufferRef)buildSampleBuffer CF_RETURNS_RETAINED;
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd CF_RETURNS_RETAINED;
 - (void)setupAudioReaderForPath:(NSString *)path matchingASBD:(const AudioStreamBasicDescription *)asbd;
@@ -42,10 +37,8 @@
     os_unfair_lock _surfaceLock;
     os_unfair_lock _videoReaderLock;
     os_unfair_lock _audioReaderLock;
-
     AVAssetReader            *_videoReader;
     AVAssetReaderTrackOutput *_videoOutput;
-
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
 }
@@ -66,20 +59,16 @@
         _client = [DiCoyClient new];
 
         __weak typeof(self) weak = self;
-
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
             DiCoyTweakManager *strong = weak;
             if (!strong) return;
-
             CFRetain(surface);
-
             os_unfair_lock_lock(&strong->_surfaceLock);
             IOSurfaceRef old = strong.latestSurface;
             strong.latestSurface = surface;
             strong.surfaceWidth  = w;
             strong.surfaceHeight = h;
             os_unfair_lock_unlock(&strong->_surfaceLock);
-
             if (old) CFRelease(old);
         };
     }
@@ -91,13 +80,12 @@
 
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
-
     if ([mode isEqualToString:@"off"]) return;
 
     self.active = YES;
 
     if ([mode isEqualToString:@"mediaInject"]) {
-        self.currentMode = kDicoyModeMediaInject;
+        self.currentMode      = kDicoyModeMediaInject;
         self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
         [self setupVideoReaderForPath:self.currentMediaPath];
     } else {
@@ -110,10 +98,8 @@
 
 - (void)stopMirroring {
     if (!self.active) return;
-
     self.active      = NO;
     self.currentMode = kDicoyModeOff;
-
     [self.client stopCapture];
     [self.client disconnect];
 
@@ -130,32 +116,24 @@
     os_unfair_lock_unlock(&_audioReaderLock);
 }
 
-// =========================================================================
-// setupVideoReaderForPath:
-// =========================================================================
-
 - (void)setupVideoReaderForPath:(NSString *)path {
     if (!path.length) return;
-
-    NSURL *url            = [NSURL fileURLWithPath:path];
-    AVURLAsset *asset     = [AVURLAsset URLAssetWithURL:url options:nil];
-    AVAssetTrack *track   = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+    NSURL *url          = [NSURL fileURLWithPath:path];
+    AVURLAsset *asset   = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) return;
 
     NSError *err          = nil;
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&err];
     if (!reader) return;
 
-    // FIX: Match the iOS default camera pixel format (YUV Bi-Planar)
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
     };
-
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track outputSettings:settings];
     output.alwaysCopiesSampleData = NO;
     [reader addOutput:output];
-
     if (![reader startReading]) return;
 
     os_unfair_lock_lock(&_videoReaderLock);
@@ -165,25 +143,20 @@
     os_unfair_lock_unlock(&_videoReaderLock);
 }
 
-// =========================================================================
-// setupAudioReaderForPath:matchingASBD:
-// =========================================================================
-
 - (void)setupAudioReaderForPath:(NSString *)path
                    matchingASBD:(const AudioStreamBasicDescription *)asbd {
     if (!path.length) return;
-
-    NSURL *url            = [NSURL fileURLWithPath:path];
-    AVURLAsset *asset     = [AVURLAsset URLAssetWithURL:url options:nil];
-    AVAssetTrack *track   = [[asset tracksWithMediaType:AVMediaTypeAudio] firstObject];
+    NSURL *url          = [NSURL fileURLWithPath:path];
+    AVURLAsset *asset   = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeAudio] firstObject];
     if (!track) return;
 
     NSError *err          = nil;
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&err];
     if (!reader) return;
 
-    Float64 sampleRate    = (asbd && asbd->mSampleRate > 0)       ? asbd->mSampleRate     : 44100.0;
-    UInt32 channels       = (asbd && asbd->mChannelsPerFrame > 0) ? asbd->mChannelsPerFrame : 1;
+    Float64 sampleRate = (asbd && asbd->mSampleRate > 0)       ? asbd->mSampleRate       : 44100.0;
+    UInt32  channels   = (asbd && asbd->mChannelsPerFrame > 0) ? asbd->mChannelsPerFrame : 1;
 
     NSDictionary *settings = @{
         AVFormatIDKey:               @(kAudioFormatLinearPCM),
@@ -194,12 +167,10 @@
         AVLinearPCMIsFloatKey:       @NO,
         AVLinearPCMIsBigEndianKey:   @NO,
     };
-
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track outputSettings:settings];
     output.alwaysCopiesSampleData = NO;
     [reader addOutput:output];
-
     if (![reader startReading]) return;
 
     os_unfair_lock_lock(&_audioReaderLock);
@@ -208,10 +179,6 @@
     _audioOutput = output;
     os_unfair_lock_unlock(&_audioReaderLock);
 }
-
-// =========================================================================
-// nextVideoSampleBuffer
-// =========================================================================
 
 - (CMSampleBufferRef)nextVideoSampleBuffer {
     os_unfair_lock_lock(&_videoReaderLock);
@@ -224,39 +191,29 @@
     if (!buf) {
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
-
         [self setupVideoReaderForPath:path];
-
         os_unfair_lock_lock(&_videoReaderLock);
         if (_videoReader && _videoReader.status == AVAssetReaderStatusReading) {
             buf = [_videoOutput copyNextSampleBuffer];
         }
         os_unfair_lock_unlock(&_videoReaderLock);
-
         if (!buf) return NULL;
     }
 
     CMTime duration = CMSampleBufferGetDuration(buf);
     if (!CMTIME_IS_VALID(duration) || CMTIME_IS_INDEFINITE(duration)) {
-        duration = CMTimeMake(1, 30); 
+        duration = CMTimeMake(1, 30);
     }
-
     CMSampleTimingInfo timing = {
         .duration              = duration,
         .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
         .decodeTimeStamp       = kCMTimeInvalid,
     };
-
     CMSampleBufferRef restamped = NULL;
     CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
     CFRelease(buf);
-
     return restamped;
 }
-
-// =========================================================================
-// nextAudioSampleBufferMatchingASBD:
-// =========================================================================
 
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd {
     os_unfair_lock_lock(&_audioReaderLock);
@@ -270,15 +227,12 @@
     if (needsSetup || !buf) {
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
-
         [self setupAudioReaderForPath:path matchingASBD:asbd];
-
         os_unfair_lock_lock(&_audioReaderLock);
         if (_audioReader && _audioReader.status == AVAssetReaderStatusReading) {
             buf = [_audioOutput copyNextSampleBuffer];
         }
         os_unfair_lock_unlock(&_audioReaderLock);
-
         if (!buf) return NULL;
     }
 
@@ -286,23 +240,16 @@
     if (!CMTIME_IS_VALID(duration) || CMTIME_IS_INDEFINITE(duration)) {
         duration = kCMTimeZero;
     }
-
     CMSampleTimingInfo timing = {
         .duration              = duration,
         .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
         .decodeTimeStamp       = kCMTimeInvalid,
     };
-
     CMSampleBufferRef restamped = NULL;
     CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
     CFRelease(buf);
-
     return restamped;
 }
-
-// =========================================================================
-// buildSampleBuffer
-// =========================================================================
 
 - (CMSampleBufferRef)buildSampleBuffer {
     if (!self.active) return NULL;
@@ -311,6 +258,7 @@
         return [self nextVideoSampleBuffer];
     }
 
+    // Screen mirror path
     os_unfair_lock_lock(&_surfaceLock);
     IOSurfaceRef surface = self.latestSurface;
     uint16_t w = self.surfaceWidth;
@@ -325,13 +273,11 @@
         (id)kCVPixelBufferHeightKey:              @(h),
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
     };
-
     CVPixelBufferRef pixBuf = NULL;
     CVReturn cvRet = CVPixelBufferCreateWithIOSurface(
         kCFAllocatorDefault, surface,
         (__bridge CFDictionaryRef)pbAttrs, &pixBuf
     );
-
     CFRelease(surface);
     if (cvRet != kCVReturnSuccess || !pixBuf) return NULL;
 
@@ -339,7 +285,6 @@
     OSStatus fmtErr = CMVideoFormatDescriptionCreateForImageBuffer(
         kCFAllocatorDefault, pixBuf, &fmtDesc
     );
-
     if (fmtErr != noErr || !fmtDesc) {
         CVPixelBufferRelease(pixBuf);
         return NULL;
@@ -350,13 +295,11 @@
         .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
         .decodeTimeStamp       = kCMTimeInvalid,
     };
-
     CMSampleBufferRef sampleBuf = NULL;
     CMSampleBufferCreateForImageBuffer(
         kCFAllocatorDefault, pixBuf, true, NULL, NULL,
         fmtDesc, &timing, &sampleBuf
     );
-
     CFRelease(fmtDesc);
     CVPixelBufferRelease(pixBuf);
     return sampleBuf;
@@ -378,27 +321,16 @@
   didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          fromConnection:(AVCaptureConnection *)connection {
 
-    DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-    CMSampleBufferRef injected = [mgr buildSampleBuffer];
-
+    CMSampleBufferRef injected = [[DiCoyTweakManager sharedManager] buildSampleBuffer];
     if (injected) {
-        // Success! Deliver the fake frame.
         [self.realDelegate captureOutput:output
                    didOutputSampleBuffer:injected
                           fromConnection:connection];
         CFRelease(injected);
     } else {
-        if (mgr.active) {
-            // DIAGNOSTIC FREEZE: The tweak is ON, but we failed to get a frame 
-            // (Sandbox blocked the file, or path is wrong).
-            // We intentionally DO NOT call the real delegate. 
-            // The camera viewfinder will freeze, proving the tweak is alive!
-        } else {
-            // Tweak is OFF. Behave normally.
-            [self.realDelegate captureOutput:output
-                       didOutputSampleBuffer:sampleBuffer
-                              fromConnection:connection];
-        }
+        [self.realDelegate captureOutput:output
+                   didOutputSampleBuffer:sampleBuffer
+                          fromConnection:connection];
     }
 }
 
@@ -436,13 +368,11 @@
          fromConnection:(AVCaptureConnection *)connection {
 
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-
     if (mgr.active && mgr.currentMode == kDicoyModeMediaInject) {
         CMAudioFormatDescriptionRef fmtDesc =
             (CMAudioFormatDescriptionRef)CMSampleBufferGetFormatDescription(sampleBuffer);
         const AudioStreamBasicDescription *asbd =
             CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
-
         CMSampleBufferRef injected = [mgr nextAudioSampleBufferMatchingASBD:asbd];
         if (injected) {
             [self.realDelegate captureOutput:output
@@ -452,7 +382,6 @@
             return;
         }
     }
-
     [self.realDelegate captureOutput:output
                didOutputSampleBuffer:sampleBuffer
                       fromConnection:connection];
@@ -493,10 +422,7 @@ static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
     if (delegate && ![delegate isKindOfClass:%c(DiCoyVideoProxy)]) {
         DiCoyVideoProxy *proxy = [DiCoyVideoProxy new];
         proxy.realDelegate = delegate;
-        
-        // TIE THE LIFESPAN OF THE PROXY TO THE OUTPUT
         objc_setAssociatedObject(self, kDiCoyVideoProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
         %orig(proxy, queue);
     } else if (!delegate) {
         objc_setAssociatedObject(self, kDiCoyVideoProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -515,10 +441,7 @@ static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
     if (delegate && ![delegate isKindOfClass:%c(DiCoyAudioProxy)]) {
         DiCoyAudioProxy *proxy = [DiCoyAudioProxy new];
         proxy.realDelegate = delegate;
-        
-        // TIE THE LIFESPAN OF THE PROXY TO THE OUTPUT
         objc_setAssociatedObject(self, kDiCoyAudioProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        
         %orig(proxy, queue);
     } else if (!delegate) {
         objc_setAssociatedObject(self, kDiCoyAudioProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -538,7 +461,6 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
                                  CFStringRef name, const void *object,
                                  CFDictionaryRef userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
 
@@ -551,6 +473,7 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
 }
 
 %ctor {
+    %init;
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
         NULL,
