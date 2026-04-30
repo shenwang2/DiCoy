@@ -2,15 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Inject into any process that loads AVFoundation.
-         This covers the Camera app, Snapchat, Instagram, FaceTime, etc.
-         To restrict to specific bundle IDs, replace "Frameworks" with
-         "Bundles" and list the target IDs instead. -->
     <key>Filter</key>
     <dict>
-        <key>Frameworks</key>
+        <key>Bundles</key>
         <array>
-            <string>AVFoundation</string>
+            <string>com.apple.AVFoundation</string>
         </array>
     </dict>
 </dict>
