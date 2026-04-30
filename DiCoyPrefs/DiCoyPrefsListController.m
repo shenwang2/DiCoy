@@ -3,10 +3,8 @@
 #import "DiCoyPrefsListController.h"
 
 // cfprefsd on iOS 14+ does not reliably flush preference domains to disk when
-// the domain doesn't belong to the current app. PSListController calls through
-// to CFPreferences, which stores the value in-memory but may never write the
-// .plist file. The tweak reads the file directly, so we force-write it here
-// on every preference change.
+// the domain doesn't belong to the current app. The tweak reads the file
+// directly, so we force-write it here bypassing cfprefsd entirely.
 static NSString *const kPrefsPlistPath = @"/var/tmp/com.dicoy.prefs.plist";
 
 @implementation DiCoyPrefsListController
@@ -20,13 +18,27 @@ static NSString *const kPrefsPlistPath = @"/var/tmp/com.dicoy.prefs.plist";
 
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
-    NSString *key = specifier.properties[@"key"];
-    if (!key) return;
+    [self _flushToDisk];
+}
+
+// PSEditTextCell may not call setPreferenceValue:specifier: if the user types
+// without triggering a change event. Flush on disappear to catch those cases.
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self _flushToDisk];
+}
+
+- (void)_flushToDisk {
     NSMutableDictionary *prefs =
         [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPlistPath]
         ?: [NSMutableDictionary dictionary];
-    if (value) prefs[key] = value;
-    else [prefs removeObjectForKey:key];
+    // Read every specifier with a key and overwrite with its current live value.
+    for (PSSpecifier *s in self.specifiers) {
+        NSString *key = s.properties[@"key"];
+        if (!key) continue;
+        id value = [self readPreferenceValue:s];
+        if (value) prefs[key] = value;
+    }
     [prefs writeToFile:kPrefsPlistPath atomically:YES];
 }
 
