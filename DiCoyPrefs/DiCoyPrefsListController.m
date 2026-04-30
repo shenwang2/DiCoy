@@ -1,20 +1,34 @@
 // DiCoyPrefs/DiCoyPrefsListController.m
-//
-// Standard PreferenceLoader list controller. Most persistence and Darwin
-// notification delivery is handled automatically by the PSListController
-// machinery via the "PostNotification" and "defaults" keys in Root.plist.
-// We subclass only to provide the specifier list.
 
 #import "DiCoyPrefsListController.h"
+
+// cfprefsd on iOS 14+ does not reliably flush preference domains to disk when
+// the domain doesn't belong to the current app. PSListController calls through
+// to CFPreferences, which stores the value in-memory but may never write the
+// .plist file. The tweak reads the file directly, so we force-write it here
+// on every preference change.
+static NSString *const kPrefsPlistPath =
+    @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist";
 
 @implementation DiCoyPrefsListController
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        // Loads Resources/Root.plist, which defines all preference cells.
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
     return _specifiers;
+}
+
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    [super setPreferenceValue:value specifier:specifier];
+    NSString *key = specifier.properties[@"key"];
+    if (!key) return;
+    NSMutableDictionary *prefs =
+        [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPlistPath]
+        ?: [NSMutableDictionary dictionary];
+    if (value) prefs[key] = value;
+    else [prefs removeObjectForKey:key];
+    [prefs writeToFile:kPrefsPlistPath atomically:YES];
 }
 
 @end
