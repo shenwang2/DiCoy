@@ -78,8 +78,12 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 }
 
 - (void)startMirroring {
+    // Step 3: prove prefs are readable and contain the expected mode.
+    NSDictionary *dbgPrefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH];
+    [[dbgPrefs description] writeToFile:@"/var/mobile/Documents/dicoy_prefs.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.active) return;
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
+    NSDictionary *prefs = dbgPrefs ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
     if ([mode isEqualToString:@"off"]) return;
     self.active = YES;
@@ -208,6 +212,9 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 // origin: real incoming sample buffer whose pixel format we match. Pass nil for the
 // AVSampleBufferDisplayLayer path (defaults to BGRA, which the display layer accepts).
 - (CMSampleBufferRef)buildSampleBufferMatchingBuffer:(CMSampleBufferRef)origin {
+    // Step 5: prove this method is reached.
+    [@"buildSampleBuffer called" writeToFile:@"/var/mobile/Documents/dicoy_build.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (!self.active) return NULL;
 
     if (self.currentMode == kDicoyModeMediaInject) {
@@ -359,6 +366,9 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 %hook AVCaptureSession
 
 - (void)startRunning {
+    // Step 2: prove AVCaptureSession -startRunning hook fires.
+    [@"startRunning fired" writeToFile:@"/var/mobile/Documents/dicoy_session.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %orig;
     [[DiCoyTweakManager sharedManager] startMirroring];
 }
@@ -481,6 +491,9 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 %hook AVCaptureVideoPreviewLayer
 
 - (void)addSublayer:(CALayer *)layer {
+    // Step 4: prove AVCaptureVideoPreviewLayer -addSublayer: fires.
+    [@"addSublayer fired" writeToFile:@"/var/mobile/Documents/dicoy_previewlayer.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %orig;
     // Only set up once per preview layer instance.
     if (objc_getAssociatedObject(self, kDiCoyDisplayLayerKey)) return;
@@ -559,6 +572,10 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
 }
 
 %ctor {
+    // Step 1: prove the dylib loads and which process it's in.
+    [[NSString stringWithFormat:@"%@ loaded", [NSProcessInfo processInfo].processName]
+     writeToFile:@"/var/mobile/Documents/dicoy_load.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %init;
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
