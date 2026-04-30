@@ -19,7 +19,9 @@
 #define DICOY_SOCKET_PATH DICOY_JB_PREFIX "/var/run/dicoy.sock"
 
 // Preferences plist path – used by DiCoyTweak to read the current mode.
-#define DICOY_PREFS_PATH  DICOY_JB_PREFIX "/var/mobile/Library/Preferences/com.dicoy.prefs.plist"
+// /var/mobile/ is a real top-level iOS path on every device; it is NOT under
+// /var/jb on rootless jailbreaks, so never prefix it with DICOY_JB_PREFIX.
+#define DICOY_PREFS_PATH  "/var/mobile/Library/Preferences/com.dicoy.prefs.plist"
 
 // Darwin notification key posted by DiCoyPrefs when the user changes modes.
 // The tweak subscribes to this to reconfigure itself without a respring.

@@ -17,15 +17,17 @@ DiCoyDaemon_CODESIGN_FLAGS = -Sentitlements.plist
 # THEOS_PACKAGE_SCHEME is exported by the root Makefile; command-line
 # overrides (THEOS_PACKAGE_SCHEME=) override it for rootful builds.
 # --------------------------------------------------------------------------
+# Theos rootless mode auto-prepends /var/jb to INSTALL_PATH.  Use the bare
+# path so the binary lands at /var/jb/usr/sbin/ without double-prefix.
+DiCoyDaemon_INSTALL_PATH = /usr/sbin
+
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-  JB_PREFIX              = /var/jb
-  _LAUNCHDAEMONS_LAYOUT  = var/jb/Library/LaunchDaemons
-  DiCoyDaemon_INSTALL_PATH = /var/jb/usr/sbin
-  DiCoyDaemon_CFLAGS    += -DDICOY_ROOTLESS=1
+  JB_PREFIX             = /var/jb
+  _LAUNCHDAEMONS_LAYOUT = var/jb/Library/LaunchDaemons
+  DiCoyDaemon_CFLAGS   += -DDICOY_ROOTLESS=1
 else
-  JB_PREFIX              =
-  _LAUNCHDAEMONS_LAYOUT  = Library/LaunchDaemons
-  DiCoyDaemon_INSTALL_PATH = /usr/sbin
+  JB_PREFIX             =
+  _LAUNCHDAEMONS_LAYOUT = Library/LaunchDaemons
 endif
 
 # --------------------------------------------------------------------------
