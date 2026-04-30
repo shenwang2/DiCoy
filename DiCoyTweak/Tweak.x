@@ -80,7 +80,7 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 - (void)startMirroring {
     // Step 3: prove prefs are readable and contain the expected mode.
     NSDictionary *dbgPrefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH];
-    [[dbgPrefs description] writeToFile:@"/var/mobile/Documents/dicoy_prefs.txt"
+    [[dbgPrefs description] writeToFile:@"/var/tmp/dicoy_prefs.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.active) return;
     NSDictionary *prefs = dbgPrefs ?: @{};
@@ -213,7 +213,7 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 // AVSampleBufferDisplayLayer path (defaults to BGRA, which the display layer accepts).
 - (CMSampleBufferRef)buildSampleBufferMatchingBuffer:(CMSampleBufferRef)origin {
     // Step 5: prove this method is reached.
-    [@"buildSampleBuffer called" writeToFile:@"/var/mobile/Documents/dicoy_build.txt"
+    [@"buildSampleBuffer called" writeToFile:@"/var/tmp/dicoy_build.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (!self.active) return NULL;
 
@@ -367,7 +367,7 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 
 - (void)startRunning {
     // Step 2: prove AVCaptureSession -startRunning hook fires.
-    [@"startRunning fired" writeToFile:@"/var/mobile/Documents/dicoy_session.txt"
+    [@"startRunning fired" writeToFile:@"/var/tmp/dicoy_session.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %orig;
     [[DiCoyTweakManager sharedManager] startMirroring];
@@ -492,7 +492,7 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 
 - (void)addSublayer:(CALayer *)layer {
     // Step 4: prove AVCaptureVideoPreviewLayer -addSublayer: fires.
-    [@"addSublayer fired" writeToFile:@"/var/mobile/Documents/dicoy_previewlayer.txt"
+    [@"addSublayer fired" writeToFile:@"/var/tmp/dicoy_previewlayer.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %orig;
     // Only set up once per preview layer instance.
@@ -573,8 +573,9 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
 
 %ctor {
     // Step 1: prove the dylib loads and which process it's in.
+    // /var/tmp is world-writable and accessible from sandboxed processes on jailbroken devices.
     [[NSString stringWithFormat:@"%@ loaded", [NSProcessInfo processInfo].processName]
-     writeToFile:@"/var/mobile/Documents/dicoy_load.txt"
+     writeToFile:@"/var/tmp/dicoy_load.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %init;
     CFNotificationCenterAddObserver(
