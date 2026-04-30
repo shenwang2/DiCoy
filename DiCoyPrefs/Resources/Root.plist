@@ -7,9 +7,6 @@
     <key>items</key>
     <array>
 
-        <!-- ============================================================ -->
-        <!-- Mode selection                                                -->
-        <!-- ============================================================ -->
         <dict>
             <key>cell</key>
             <string>PSGroupCell</string>
@@ -19,35 +16,33 @@
             <string>Screen Mirror replaces the camera with a live capture of the device display. Media Inject plays a local video or image file instead.</string>
         </dict>
 
-        <!-- PSSegmentedCell presents a segmented control (Off / Screen Mirror / Media Inject). -->
-        <!-- "PostNotification" causes PSListController to call notify_post() automatically  -->
-        <!-- whenever the value changes, so connected tweaks reconfigure in real time.        -->
         <dict>
             <key>cell</key>
             <string>PSSegmentedCell</string>
             <key>label</key>
-            <string>Frame Rate</string>
+            <string>Mode</string>
             <key>key</key>
-            <string>fps</string>
+            <string>mode</string>
             <key>default</key>
-            <string>30</string>
+            <string>off</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
+            <key>PostNotification</key>
+            <string>com.dicoy.modeChanged</string>
             <key>validValues</key>
             <array>
-                <string>30</string>
-                <string>60</string>
+                <string>off</string>
+                <string>screenMirror</string>
+                <string>mediaInject</string>
             </array>
             <key>validTitles</key>
             <array>
-                <string>30 FPS</string>
-                <string>60 FPS</string>
+                <string>Off</string>
+                <string>Screen Mirror</string>
+                <string>Media Inject</string>
             </array>
         </dict>
 
-        <!-- ============================================================ -->
-        <!-- Media Injection settings                                      -->
-        <!-- ============================================================ -->
         <dict>
             <key>cell</key>
             <string>PSGroupCell</string>
@@ -76,9 +71,6 @@
             <integer>0</integer>
         </dict>
 
-        <!-- ============================================================ -->
-        <!-- Capture settings                                              -->
-        <!-- ============================================================ -->
         <dict>
             <key>cell</key>
             <string>PSGroupCell</string>
@@ -99,12 +91,12 @@
             <string>30</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
-            <key>values</key>
+            <key>validValues</key>
             <array>
                 <string>30</string>
                 <string>60</string>
             </array>
-            <key>titles</key>
+            <key>validTitles</key>
             <array>
                 <string>30 FPS</string>
                 <string>60 FPS</string>
