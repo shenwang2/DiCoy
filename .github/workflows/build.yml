@@ -15,8 +15,6 @@ jobs:
   build:
     name: Build (${{ matrix.label }})
     runs-on: macos-14
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -32,8 +30,6 @@ jobs:
 
       - name: Setup Theos
         uses: Randomblock1/theos-action@v1
-        with:
-          theos-sdks: 'https://github.com/theos/sdks'
 
       - name: Download iPhoneOS16.5.sdk
         run: |
