@@ -78,12 +78,18 @@ static const void *kDiCoyMaskLayerKey    = &kDiCoyMaskLayerKey;
 }
 
 - (void)startMirroring {
-    // Step 3: prove prefs are readable and contain the expected mode.
-    NSDictionary *dbgPrefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH];
-    [[dbgPrefs description] writeToFile:@"/var/tmp/dicoy_prefs.txt"
+    // Step 3a: prove startMirroring is entered — fixed string, no nil dependency.
+    [@"startMirroring entered" writeToFile:@"/var/tmp/dicoy_start.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // Step 3b: read prefs and report success or sandbox error.
+    NSError *_prefsErr = nil;
+    NSString *_rawPrefs = [NSString stringWithContentsOfFile:@DICOY_PREFS_PATH
+                                                   encoding:NSUTF8StringEncoding error:&_prefsErr];
+    [(_rawPrefs ?: [NSString stringWithFormat:@"READ FAILED: %@", _prefsErr])
+     writeToFile:@"/var/tmp/dicoy_prefs.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.active) return;
-    NSDictionary *prefs = dbgPrefs ?: @{};
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
     if ([mode isEqualToString:@"off"]) return;
     self.active = YES;

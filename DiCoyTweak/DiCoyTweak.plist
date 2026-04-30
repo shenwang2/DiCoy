@@ -7,7 +7,9 @@
         <key>Bundles</key>
         <array>
             <string>com.apple.camera</string>
-            <string>com.toyopagroup.picaboo</string> <string>com.burbn.instagram</string> </array>
+            <string>com.toyopagroup.picaboo</string>
+            <string>com.burbn.instagram</string>
+        </array>
     </dict>
 </dict>
 </plist>

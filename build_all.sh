@@ -61,7 +61,7 @@ build_scheme() {
 
     # Command-line THEOS_PACKAGE_SCHEME overrides the rootless default
     # exported in the root Makefile; passing an empty string produces rootful.
-    make package THEOS_PACKAGE_SCHEME="${scheme}"
+    make package THEOS_PACKAGE_SCHEME="${scheme}" FINALPACKAGE=1
 
     # Move/rename output debs into a scheme-specific subdirectory
     mkdir -p "${out_dir}"
