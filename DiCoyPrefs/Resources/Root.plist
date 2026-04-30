@@ -19,12 +19,12 @@
             <string>Screen Mirror replaces the camera with a live capture of the device display. Media Inject plays a local video or image file instead.</string>
         </dict>
 
-        <!-- PSSegmentCell presents a segmented control (Off / Screen Mirror / Media Inject). -->
+        <!-- PSSegmentedCell presents a segmented control (Off / Screen Mirror / Media Inject). -->
         <!-- "PostNotification" causes PSListController to call notify_post() automatically  -->
         <!-- whenever the value changes, so connected tweaks reconfigure in real time.        -->
         <dict>
             <key>cell</key>
-            <string>PSSegmentCell</string>
+            <string>PSSegmentedCell</string>
             <key>label</key>
             <string>Mode</string>
             <key>key</key>
@@ -94,7 +94,7 @@
 
         <dict>
             <key>cell</key>
-            <string>PSSegmentCell</string>
+            <string>PSSegmentedCell</string>
             <key>label</key>
             <string>Frame Rate</string>
             <key>key</key>
