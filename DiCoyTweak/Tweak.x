@@ -32,6 +32,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <os/lock.h>
 #import <notify.h>
+#import <objc/runtime.h>
 #import "DiCoyClient.h"
 #import "DiCoyProtocol.h"
 
@@ -62,7 +63,8 @@
 - (void)setupAudioReaderForPath:(NSString *)path matchingASBD:(const AudioStreamBasicDescription *)asbd;
 
 @property (nonatomic, strong)  DiCoyClient *client;
-@property (nonatomic, assign)  IOSurfaceRef latestSurface; // protected by _surfaceLock
+@property (nonatomic, assign)  IOSurfaceRef latestSurface;
+// protected by _surfaceLock
 @property (nonatomic, assign)  uint16_t surfaceWidth;
 @property (nonatomic, assign)  uint16_t surfaceHeight;
 @property (nonatomic, assign)  BOOL active;
@@ -133,7 +135,7 @@
 
     if ([mode isEqualToString:@"mediaInject"]) {
         self.currentMode = kDicoyModeMediaInject;
-        
+
         NSString *mediaPath = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mediaFilePath"), CFSTR("com.dicoy.prefs"));
         self.currentMediaPath = mediaPath ?: @"";
         
@@ -533,6 +535,10 @@
 // Logos hooks
 // =========================================================================
 
+// Keys for the Objective-C runtime to store our proxies
+static const void *kDiCoyVideoProxyKey = &kDiCoyVideoProxyKey;
+static const void *kDiCoyAudioProxyKey = &kDiCoyAudioProxyKey;
+
 %hook AVCaptureSession
 
 - (void)startRunning {
@@ -554,7 +560,15 @@
     if (delegate && ![delegate isKindOfClass:%c(DiCoyVideoProxy)]) {
         DiCoyVideoProxy *proxy = [DiCoyVideoProxy new];
         proxy.realDelegate = delegate;
+        
+        // TIE THE LIFESPAN OF THE PROXY TO THE OUTPUT
+        objc_setAssociatedObject(self, kDiCoyVideoProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
         %orig(proxy, queue);
+    } else if (!delegate) {
+        // If the app sets the delegate to nil, destroy our proxy
+        objc_setAssociatedObject(self, kDiCoyVideoProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig;
     } else {
         %orig;
     }
@@ -569,7 +583,15 @@
     if (delegate && ![delegate isKindOfClass:%c(DiCoyAudioProxy)]) {
         DiCoyAudioProxy *proxy = [DiCoyAudioProxy new];
         proxy.realDelegate = delegate;
+        
+        // TIE THE LIFESPAN OF THE PROXY TO THE OUTPUT
+        objc_setAssociatedObject(self, kDiCoyAudioProxyKey, proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        
         %orig(proxy, queue);
+    } else if (!delegate) {
+        // If the app sets the delegate to nil, destroy our proxy
+        objc_setAssociatedObject(self, kDiCoyAudioProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig;
     } else {
         %orig;
     }
