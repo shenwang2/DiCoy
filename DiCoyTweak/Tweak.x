@@ -47,13 +47,16 @@
 + (instancetype)sharedManager;
 - (void)startMirroring;
 - (void)stopMirroring;
+
 // Builds a video CMSampleBufferRef. Screen mirror: IOSurface → CVPixelBuffer.
 // Media inject: AVAssetReader → restamped copy. Caller must CFRelease.
 - (CMSampleBufferRef)buildSampleBuffer CF_RETURNS_RETAINED;
+
 // Reads the next audio chunk from the inject file, converting to match asbd.
 // Lazily initialises the audio AVAssetReader on the first call.
 // Returns NULL in screen mirror mode or if no file/track exists. Caller must CFRelease.
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd CF_RETURNS_RETAINED;
+
 // Initialises (or re-initialises) the audio AVAssetReader. Called from
 // DiCoyAudioProxy on the first real mic callback once the ASBD is known.
 - (void)setupAudioReaderForPath:(NSString *)path matchingASBD:(const AudioStreamBasicDescription *)asbd;
@@ -71,8 +74,10 @@
     os_unfair_lock _surfaceLock;
     os_unfair_lock _videoReaderLock;
     os_unfair_lock _audioReaderLock;
+
     AVAssetReader            *_videoReader;
     AVAssetReaderTrackOutput *_videoOutput;
+
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
 }
@@ -91,19 +96,23 @@
         _videoReaderLock = OS_UNFAIR_LOCK_INIT;
         _audioReaderLock = OS_UNFAIR_LOCK_INIT;
         _client = [DiCoyClient new];
+
         __weak typeof(self) weak = self;
 
         // Called on client's private read queue for each FRAME_READY from daemon.
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
             DiCoyTweakManager *strong = weak;
             if (!strong) return;
+
             CFRetain(surface);
+
             os_unfair_lock_lock(&strong->_surfaceLock);
             IOSurfaceRef old = strong.latestSurface;
             strong.latestSurface = surface;
             strong.surfaceWidth  = w;
             strong.surfaceHeight = h;
             os_unfair_lock_unlock(&strong->_surfaceLock);
+
             if (old) CFRelease(old);
         };
     }
@@ -113,16 +122,21 @@
 - (void)startMirroring {
     if (self.active) return;
 
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:
-        @DICOY_PREFS_PATH];
-    NSString *mode = prefs[@"mode"] ?: @"off";
+    // Use CFPreferences to read values across the sandbox boundary
+    CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
+    NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
+    if (!mode) mode = @"off";
+
     if ([mode isEqualToString:@"off"]) return;
 
     self.active = YES;
 
     if ([mode isEqualToString:@"mediaInject"]) {
-        self.currentMode      = kDicoyModeMediaInject;
-        self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
+        self.currentMode = kDicoyModeMediaInject;
+        
+        NSString *mediaPath = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mediaFilePath"), CFSTR("com.dicoy.prefs"));
+        self.currentMediaPath = mediaPath ?: @"";
+        
         [self setupVideoReaderForPath:self.currentMediaPath];
         // Audio reader is lazily initialised on the first mic callback once
         // the session's AudioStreamBasicDescription is known.
@@ -136,6 +150,7 @@
 
 - (void)stopMirroring {
     if (!self.active) return;
+
     self.active      = NO;
     self.currentMode = kDicoyModeOff;
 
@@ -165,6 +180,7 @@
 
 - (void)setupVideoReaderForPath:(NSString *)path {
     if (!path.length) return;
+
     NSURL *url            = [NSURL fileURLWithPath:path];
     AVURLAsset *asset     = [AVURLAsset URLAssetWithURL:url options:nil];
     AVAssetTrack *track   = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
@@ -177,10 +193,12 @@
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
     };
+
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track outputSettings:settings];
     output.alwaysCopiesSampleData = NO;
     [reader addOutput:output];
+
     if (![reader startReading]) return;
 
     os_unfair_lock_lock(&_videoReaderLock);
@@ -201,6 +219,7 @@
 - (void)setupAudioReaderForPath:(NSString *)path
                    matchingASBD:(const AudioStreamBasicDescription *)asbd {
     if (!path.length) return;
+
     NSURL *url            = [NSURL fileURLWithPath:path];
     AVURLAsset *asset     = [AVURLAsset URLAssetWithURL:url options:nil];
     AVAssetTrack *track   = [[asset tracksWithMediaType:AVMediaTypeAudio] firstObject];
@@ -210,7 +229,7 @@
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&err];
     if (!reader) return;
 
-    Float64 sampleRate    = (asbd && asbd->mSampleRate > 0)     ? asbd->mSampleRate     : 44100.0;
+    Float64 sampleRate    = (asbd && asbd->mSampleRate > 0)       ? asbd->mSampleRate     : 44100.0;
     UInt32 channels       = (asbd && asbd->mChannelsPerFrame > 0) ? asbd->mChannelsPerFrame : 1;
 
     NSDictionary *settings = @{
@@ -222,10 +241,12 @@
         AVLinearPCMIsFloatKey:       @NO,
         AVLinearPCMIsBigEndianKey:   @NO,
     };
+
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track outputSettings:settings];
     output.alwaysCopiesSampleData = NO;
     [reader addOutput:output];
+
     if (![reader startReading]) return;
 
     os_unfair_lock_lock(&_audioReaderLock);
@@ -255,12 +276,15 @@
         // EOF, error, or reader not yet created — loop/reset.
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
+
         [self setupVideoReaderForPath:path];
+
         os_unfair_lock_lock(&_videoReaderLock);
         if (_videoReader && _videoReader.status == AVAssetReaderStatusReading) {
             buf = [_videoOutput copyNextSampleBuffer];
         }
         os_unfair_lock_unlock(&_videoReaderLock);
+
         if (!buf) return NULL;
     }
 
@@ -268,14 +292,17 @@
     if (!CMTIME_IS_VALID(duration) || CMTIME_IS_INDEFINITE(duration)) {
         duration = CMTimeMake(1, 30); // fallback: 30 FPS
     }
+
     CMSampleTimingInfo timing = {
         .duration              = duration,
         .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
         .decodeTimeStamp       = kCMTimeInvalid,
     };
+
     CMSampleBufferRef restamped = NULL;
     CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
     CFRelease(buf);
+
     return restamped; // NULL on copy failure; caller CFRelease otherwise
 }
 
@@ -300,12 +327,15 @@
         // Lazy init or EOF — set up / reset the reader.
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
+
         [self setupAudioReaderForPath:path matchingASBD:asbd];
+
         os_unfair_lock_lock(&_audioReaderLock);
         if (_audioReader && _audioReader.status == AVAssetReaderStatusReading) {
             buf = [_audioOutput copyNextSampleBuffer];
         }
         os_unfair_lock_unlock(&_audioReaderLock);
+
         if (!buf) return NULL;
     }
 
@@ -313,14 +343,17 @@
     if (!CMTIME_IS_VALID(duration) || CMTIME_IS_INDEFINITE(duration)) {
         duration = kCMTimeZero;
     }
+
     CMSampleTimingInfo timing = {
         .duration              = duration,
         .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
         .decodeTimeStamp       = kCMTimeInvalid,
     };
+
     CMSampleBufferRef restamped = NULL;
     CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
     CFRelease(buf);
+
     return restamped;
 }
 
@@ -353,11 +386,13 @@
         (id)kCVPixelBufferHeightKey:              @(h),
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
     };
+
     CVPixelBufferRef pixBuf = NULL;
     CVReturn cvRet = CVPixelBufferCreateWithIOSurface(
         kCFAllocatorDefault, surface,
         (__bridge CFDictionaryRef)pbAttrs, &pixBuf
     );
+
     CFRelease(surface);
     if (cvRet != kCVReturnSuccess || !pixBuf) return NULL;
 
@@ -365,6 +400,7 @@
     OSStatus fmtErr = CMVideoFormatDescriptionCreateForImageBuffer(
         kCFAllocatorDefault, pixBuf, &fmtDesc
     );
+
     if (fmtErr != noErr || !fmtDesc) {
         CVPixelBufferRelease(pixBuf);
         return NULL;
@@ -408,6 +444,7 @@
          fromConnection:(AVCaptureConnection *)connection {
 
     CMSampleBufferRef injected = [[DiCoyTweakManager sharedManager] buildSampleBuffer];
+
     if (injected) {
         [self.realDelegate captureOutput:output
                    didOutputSampleBuffer:injected
@@ -462,6 +499,7 @@
          fromConnection:(AVCaptureConnection *)connection {
 
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+
     if (mgr.active && mgr.currentMode == kDicoyModeMediaInject) {
         CMAudioFormatDescriptionRef fmtDesc =
             (CMAudioFormatDescriptionRef)CMSampleBufferGetFormatDescription(sampleBuffer);
@@ -547,9 +585,11 @@ static void modeChangedCallback(CFNotificationCenterRef center, void *observer,
                                  CFStringRef name, const void *object,
                                  CFDictionaryRef userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:
-        @DICOY_PREFS_PATH];
-    NSString *mode = prefs[@"mode"] ?: @"off";
+
+    // Use CFPreferences to read values across the sandbox boundary
+    CFPreferencesAppSynchronize(CFSTR("com.dicoy.prefs"));
+    NSString *mode = (__bridge_transfer NSString *)CFPreferencesCopyAppValue(CFSTR("mode"), CFSTR("com.dicoy.prefs"));
+    if (!mode) mode = @"off";
 
     if ([mode isEqualToString:@"off"]) {
         if (mgr.active) [mgr stopMirroring];
