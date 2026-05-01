@@ -1,11 +1,13 @@
 // DiCoyPrefs/DiCoyPrefsListController.m
 
 #import "DiCoyPrefsListController.h"
+#import "DiCoyProtocol.h"
 
 // cfprefsd on iOS 14+ does not reliably flush preference domains to disk when
 // the domain doesn't belong to the current app. The tweak reads the file
-// directly, so we force-write it here bypassing cfprefsd entirely.
-static NSString *const kPrefsPlistPath = @"/var/tmp/com.dicoy.prefs.plist";
+// directly via libSandy-unlocked access, so we force-write it here bypassing
+// cfprefsd entirely. Settings.app is unsandboxed and can write the path directly.
+static NSString *const kPrefsPlistPath = @DICOY_PREFS_PATH;
 
 @implementation DiCoyPrefsListController
 

@@ -9,7 +9,7 @@ DiCoyPrefs_FILES      = DiCoyPrefsListController.m
 DiCoyPrefs_FRAMEWORKS         = Foundation UIKit
 DiCoyPrefs_PRIVATE_FRAMEWORKS = Preferences
 
-DiCoyPrefs_CFLAGS     = -fobjc-arc
+DiCoyPrefs_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)/DiCoyTweak
 
 DiCoyPrefs_RESOURCE_DIRS = Resources
 
@@ -25,6 +25,7 @@ DiCoyPrefs_INSTALL_PATH = /Library/PreferenceBundles
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
   _PREFLOADER_LAYOUT = var/jb/Library/PreferenceLoader/Preferences
   JB_PREFIX          = /var/jb
+  DiCoyPrefs_CFLAGS += -DDICOY_ROOTLESS=1
 else
   _PREFLOADER_LAYOUT = Library/PreferenceLoader/Preferences
   JB_PREFIX          =
