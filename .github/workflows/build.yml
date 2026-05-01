@@ -40,13 +40,16 @@ jobs:
 
       - name: Build and install libSandy
         run: |
+          # Use Xcode's full iOS SDK so xpc/xpc.h and mach-o/dyld.h are available.
+          # The theos/sdks trimmed package omits usr/include; Xcode's SDK has everything.
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           cd vendor/libSandy
           make clean 2>/dev/null || true
           make \
             FINALPACKAGE=1 \
             ONLY_LIBRARY=1 \
             THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
-            SYSROOT=$THEOS/sdks/iPhoneOS16.5.sdk \
+            SYSROOT="$IOS_SDK" \
             TARGET="iphone:clang:16.5:15.0" \
             ARCHS="arm64 arm64e"
           DYLIB=$(find .theos/obj -name "libsandy.dylib" -type f | head -1)
