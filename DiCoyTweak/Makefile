@@ -8,6 +8,7 @@ TWEAK_NAME = DiCoyTweak
 DiCoyTweak_FILES      = Tweak.x DiCoyClient.m
 DiCoyTweak_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo IOSurface \
                         QuartzCore CoreFoundation AudioToolbox CoreImage
+DiCoyTweak_LIBRARIES  = sandy
 DiCoyTweak_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)
 
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)

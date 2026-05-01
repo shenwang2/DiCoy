@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AllowedProcesses</key>
+	<array>
+		<string>*</string>
+	</array>
+	<key>Extensions</key>
+	<array>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>%%JB_PREFIX%%/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>%%JB_PREFIX%%/var/run/dicoy.sock</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>iokit_user_client</string>
+			<key>extension_class</key>
+			<string>com.apple.security.exception.iokit-user-client-class</string>
+			<key>registry_entry_class</key>
+			<string>IOSurfaceRootUserClient</string>
+		</dict>
+	</array>
+</dict>
+</plist>

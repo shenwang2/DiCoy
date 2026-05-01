@@ -131,6 +131,5 @@
   - DiCoyTweak/DiCoyProtocol.h — same as above (the two copies are now identical)
   - DiCoyTweak/Tweak.x — both prefs path strings replaced with @DICOY_PREFS_PATH
   - README.md — updated: audio injection feature, rootful deb, build_all.sh, links to new docs
-  - CLAUDE.md — updated: rootless/rootful macro system, media inject pipeline, AltList, launchd plist generation, CI/CD, removed stale "Known Incomplete" entry
    
    ---

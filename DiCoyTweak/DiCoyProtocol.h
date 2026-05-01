@@ -18,11 +18,10 @@
 // sandboxed app processes can connect without special entitlements.
 #define DICOY_SOCKET_PATH DICOY_JB_PREFIX "/var/run/dicoy.sock"
 
-// Preferences plist path – used by DiCoyTweak to read the current mode.
-// Stored in /var/tmp/ (world-readable/writable, sticky) so Camera.app's sandbox
-// can read it. /var/mobile/Library/Preferences/ is blocked by Camera's sandbox
-// profile (EPERM) even on jailbroken devices.
-#define DICOY_PREFS_PATH  "/var/tmp/com.dicoy.prefs.plist"
+// Preferences plist path – used by DiCoyTweak to read the current mode and by
+// DiCoyPrefs to write it. libSandy (applied in %ctor) grants the injected process
+// read-write access to this path via the DiCoy sandbox profile.
+#define DICOY_PREFS_PATH  DICOY_JB_PREFIX "/var/mobile/Library/Preferences/com.dicoy.prefs.plist"
 
 // Darwin notification key posted by DiCoyPrefs when the user changes modes.
 // The tweak subscribes to this to reconfigure itself without a respring.

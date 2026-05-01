@@ -11,6 +11,7 @@
 #import <objc/runtime.h>
 #import "DiCoyClient.h"
 #import "DiCoyProtocol.h"
+#import <libSandy.h>
 
 static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 
@@ -691,10 +692,15 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
 
 %ctor {
     // Step 1: prove the dylib loads and which process it's in.
-    // /var/tmp is world-writable and accessible from sandboxed processes on jailbroken devices.
     [[NSString stringWithFormat:@"%@ loaded", [NSProcessInfo processInfo].processName]
      writeToFile:@"/var/tmp/dicoy_load.txt"
      atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    // Consume libSandy sandbox extensions before hooks register so that prefs
+    // file access, socket connect, and IOSurfaceLookup are all unlocked by the
+    // time any hook-initiated code runs.
+    libSandy_applyProfile("DiCoy");
+
     %init;
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
