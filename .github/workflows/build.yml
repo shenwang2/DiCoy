@@ -40,16 +40,20 @@ jobs:
 
       - name: Build and install libSandy
         run: |
-          # Use Xcode's full iOS SDK so xpc/xpc.h and mach-o/dyld.h are available.
-          # The theos/sdks trimmed package omits usr/include; Xcode's SDK has everything.
+          # theos/sdks trimmed package omits usr/include, so xpc/xpc.h is missing.
+          # Theos ignores a command-line SYSROOT override; it always computes its own
+          # sysroot as $THEOS/sdks/iPhoneOS<ver>.sdk. Patch that directory in-place
+          # with headers from Xcode's full bundled iOS SDK (present on all macos runners).
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
+          rsync -a --ignore-existing "$IOS_SDK/usr/include/" \
+            "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include/"
           cd vendor/libSandy
           make clean 2>/dev/null || true
           make \
             FINALPACKAGE=1 \
             ONLY_LIBRARY=1 \
             THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
-            SYSROOT="$IOS_SDK" \
             TARGET="iphone:clang:16.5:15.0" \
             ARCHS="arm64 arm64e"
           DYLIB=$(find .theos/obj -name "libsandy.dylib" -type f | head -1)
