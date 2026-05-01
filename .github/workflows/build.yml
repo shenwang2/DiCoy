@@ -38,6 +38,26 @@ jobs:
           tar -xf iPhoneOS16.5.sdk.tar.xz -C $THEOS/sdks/
           rm *.tar.xz
 
+      - name: Build and install libSandy
+        run: |
+          cd libSandy-main
+          make clean 2>/dev/null || true
+          make \
+            FINALPACKAGE=1 \
+            ONLY_LIBRARY=1 \
+            THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+            SYSROOT=$THEOS/sdks/iPhoneOS16.5.sdk \
+            TARGET="iphone:clang:16.5:15.0" \
+            ARCHS="arm64 arm64e"
+          DYLIB=$(find .theos/obj -name "libsandy.dylib" -type f | head -1)
+          if [[ "${{ matrix.scheme }}" == "rootless" ]]; then
+            mkdir -p $THEOS/lib/iphone/rootless
+            cp "$DYLIB" $THEOS/lib/iphone/rootless/libsandy.dylib
+          else
+            cp "$DYLIB" $THEOS/lib/libsandy.dylib
+          fi
+          cp libSandy.h $THEOS/include/
+
       - name: Build (${{ matrix.label }})
         run: |
           make clean 2>/dev/null || true
@@ -118,7 +138,7 @@ jobs:
             | `*_iphoneos-arm64_rootless.deb` | 15.0 – 17.0 | Dopamine 2.x · palera1n rootless · RootHide |
             | `*_iphoneos-arm_rootful.deb` | 15.0 – 17.0 | checkra1n · unc0ver · palera1n rootful |
 
-            Both packages require **MobileSubstrate / ElleKit** and **PreferenceLoader**.
+            Both packages require **MobileSubstrate / ElleKit**, **PreferenceLoader**, and **libSandy** (`com.opa334.libsandy` — available on the Havoc and Chariz repos). Your package manager will install it automatically.
 
             After installation the daemon starts automatically. Open **Settings → DiCoy** to configure the injection mode.
 
