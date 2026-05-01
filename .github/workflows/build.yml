@@ -40,7 +40,7 @@ jobs:
 
       - name: Build and install libSandy
         run: |
-          cd libSandy-main
+          cd vendor/libSandy
           make clean 2>/dev/null || true
           make \
             FINALPACKAGE=1 \
