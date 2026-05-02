@@ -7,6 +7,12 @@
         <key>Bundles</key>
         <array>
             <string>com.apple.AVFoundation</string>
+            <string>com.apple.WebKit</string>
+        </array>
+        <key>Executables</key>
+        <array>
+            <string>com.apple.WebKit.WebContent</string>
+            <string>com.apple.WebKit.GPU</string>
         </array>
     </dict>
 </dict>
