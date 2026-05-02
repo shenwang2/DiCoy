@@ -25,7 +25,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 - (void)startMirroring;
 - (void)stopMirroring;
 - (CMSampleBufferRef)buildSampleBufferMatchingBuffer:(CMSampleBufferRef)origin CF_RETURNS_RETAINED;
-- (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd origin:(CMSampleBufferRef)origin CF_RETURNS_RETAINED;
+- (CMSampleBufferRef)nextAudioSampleBufferMatchingOrigin:(CMSampleBufferRef)origin CF_RETURNS_RETAINED;
 
 @property (nonatomic, strong)  DiCoyClient *client;
 @property (nonatomic, assign)  IOSurfaceRef latestSurface;
@@ -34,7 +34,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 @property (nonatomic, assign)  BOOL active;
 @property (nonatomic, assign)  DicoyMode currentMode;
 @property (nonatomic, copy)    NSString *currentMediaPath;
-@property (nonatomic, assign)  CMTime currentAudioPTS;
+@property (nonatomic, strong)  NSMutableData *audioRingBuffer; // Holds audio overflow
 @end
 
 @implementation DiCoyTweakManager {
@@ -43,7 +43,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock _audioReaderLock;
     
     AVAssetReader            *_videoReader;
-    AVAssetReaderOutput      *_videoOutput; // Swapped to generic output to support VideoCompositionOutput
+    AVAssetReaderOutput      *_videoOutput; // Swapped to generic output for composition
     OSType                    _videoFormat;
     
     AVAssetReader            *_audioReader;
@@ -64,7 +64,6 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
         _videoReaderLock = OS_UNFAIR_LOCK_INIT;
         _audioReaderLock = OS_UNFAIR_LOCK_INIT;
         _client = [DiCoyClient new];
-        _currentAudioPTS = kCMTimeInvalid;
         
         __weak typeof(self) weak = self;
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
@@ -85,7 +84,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 
 - (void)startMirroring {
     if (self.active) return;
-    
+
     NSDictionary *prefs =
         [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH]
         ?: [NSDictionary dictionaryWithContentsOfFile:
@@ -96,12 +95,23 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     [mode writeToFile:@"/var/tmp/dicoy_mode.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
     
     if ([mode isEqualToString:@"off"]) return;
+    
+    // --- AltList Per-App Filtering ---
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    if (!bundleID) return; // Safety check for daemons without a bundle ID
+    
+    NSDictionary *enabledApps = prefs[@"enabledApps"];
+    BOOL isAppEnabled = [enabledApps[bundleID] boolValue];
+    
+    if (!isAppEnabled) {
+        return; // App is not toggled on in settings, stay dormant.
+    }
+    
     self.active = YES;
     
     if ([mode isEqualToString:@"mediaInject"]) {
         self.currentMode      = kDicoyModeMediaInject;
         self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
-        self.currentAudioPTS  = kCMTimeInvalid;
         [self _setupVideoReaderForPath:self.currentMediaPath pixelFormat:kCVPixelFormatType_32BGRA];
     } else {
         self.currentMode = kDicoyModeScreenMirror;
@@ -113,7 +123,6 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     if (!self.active) return;
     self.active      = NO;
     self.currentMode = kDicoyModeOff;
-    self.currentAudioPTS = kCMTimeInvalid;
     
     [self.client stopCapture];
     [self.client disconnect];
@@ -129,6 +138,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     [_audioReader cancelReading];
     _audioReader = nil;
     _audioOutput = nil;
+    self.audioRingBuffer = nil; // Clear out the ring buffer
     os_unfair_lock_unlock(&_audioReaderLock);
 }
 
@@ -140,7 +150,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
     if (!reader) return;
 
-    // Apply native video orientation (fixes the sideways video issue)
+    // Apply native video orientation
     AVMutableVideoComposition *comp = [AVMutableVideoComposition videoCompositionWithPropertiesOfAsset:asset];
     AVAssetReaderVideoCompositionOutput *out = [AVAssetReaderVideoCompositionOutput
         assetReaderVideoCompositionOutputWithVideoTracks:@[track]
@@ -168,29 +178,18 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
     if (!reader) return;
 
-    // Dynamically match the microphone's hardware layout to prevent pipeline rejection
-    NSDictionary *settings = nil;
-    if (asbd) {
-        settings = @{
-            AVFormatIDKey:               @(kAudioFormatLinearPCM),
-            AVSampleRateKey:             @(asbd->mSampleRate),
-            AVNumberOfChannelsKey:       @(asbd->mChannelsPerFrame),
-            AVLinearPCMBitDepthKey:      @(asbd->mBitsPerChannel > 0 ? asbd->mBitsPerChannel : 32),
-            AVLinearPCMIsNonInterleaved: @((asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0),
-            AVLinearPCMIsFloatKey:       @((asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0),
-            AVLinearPCMIsBigEndianKey:   @((asbd->mFormatFlags & kAudioFormatFlagIsBigEndian) != 0)
-        };
-    } else {
-        settings = @{
-            AVFormatIDKey:               @(kAudioFormatLinearPCM),
-            AVSampleRateKey:             @(44100.0),
-            AVNumberOfChannelsKey:       @(1),
-            AVLinearPCMBitDepthKey:      @(16),
-            AVLinearPCMIsNonInterleaved: @NO,
-            AVLinearPCMIsFloatKey:       @NO,
-            AVLinearPCMIsBigEndianKey:   @NO
-        };
-    }
+    Float64 sr = (asbd && asbd->mSampleRate > 0)       ? asbd->mSampleRate       : 44100.0;
+    UInt32  ch = (asbd && asbd->mChannelsPerFrame > 0) ? asbd->mChannelsPerFrame : 1;
+    
+    NSDictionary *settings = @{
+        AVFormatIDKey:               @(kAudioFormatLinearPCM),
+        AVSampleRateKey:             @(sr),
+        AVNumberOfChannelsKey:       @(ch),
+        AVLinearPCMBitDepthKey:      @(16),
+        AVLinearPCMIsNonInterleaved: @NO,
+        AVLinearPCMIsFloatKey:       @NO,
+        AVLinearPCMIsBigEndianKey:   @NO,
+    };
 
     AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track outputSettings:settings];
@@ -307,57 +306,99 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     return result;
 }
 
-- (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd origin:(CMSampleBufferRef)origin {
+- (CMSampleBufferRef)nextAudioSampleBufferMatchingOrigin:(CMSampleBufferRef)origin {
     if (!origin) return NULL;
-    
-    CMTime originPTS = CMSampleBufferGetPresentationTimeStamp(origin);
-    
-    // Throttle: If our injected audio is ahead of the real-time mic, skip this cycle.
-    if (CMTIME_IS_VALID(self.currentAudioPTS) && CMTimeCompare(self.currentAudioPTS, originPTS) > 0) {
+
+    CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(origin);
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
+    if (!asbd) return NULL;
+
+    CMItemCount numSamples = CMSampleBufferGetNumSamples(origin);
+    if (numSamples == 0) return NULL;
+
+    // Calculate exact bytes needed to prevent memory corruption in the host app pipeline
+    size_t bytesPerFrame = asbd->mBytesPerFrame;
+    if (bytesPerFrame == 0) {
+        bytesPerFrame = (asbd->mBitsPerChannel / 8) * asbd->mChannelsPerFrame;
+    }
+    size_t bytesNeeded = numSamples * bytesPerFrame;
+
+    os_unfair_lock_lock(&_audioReaderLock);
+
+    if (!self.audioRingBuffer) {
+        self.audioRingBuffer = [NSMutableData data];
+    }
+
+    // Accumulate chunks from AVAssetReader until we have enough
+    while (self.audioRingBuffer.length < bytesNeeded) {
+        BOOL needsSetup = (_audioReader == nil || _audioReader.status != AVAssetReaderStatusReading);
+        if (needsSetup) {
+            NSString *path = self.currentMediaPath;
+            if (!path.length) break;
+            [self _setupAudioReaderForPath:path matchingASBD:asbd];
+        }
+
+        CMSampleBufferRef fileBuf = [_audioOutput copyNextSampleBuffer];
+        if (!fileBuf) {
+            [_audioReader cancelReading];
+            _audioReader = nil;
+            continue; // Loop back to restart file
+        }
+
+        CMBlockBufferRef blockBuf = CMSampleBufferGetDataBuffer(fileBuf);
+        if (blockBuf) {
+            size_t lengthAtOffset, totalLength;
+            char *dataPointer;
+            if (CMBlockBufferGetDataPointer(blockBuf, 0, &lengthAtOffset, &totalLength, &dataPointer) == kCMBlockBufferNoErr) {
+                [self.audioRingBuffer appendBytes:dataPointer length:totalLength];
+            }
+        }
+        CFRelease(fileBuf);
+    }
+
+    if (self.audioRingBuffer.length < bytesNeeded) {
+        os_unfair_lock_unlock(&_audioReaderLock);
         return NULL;
     }
 
-    os_unfair_lock_lock(&_audioReaderLock);
-    BOOL needsSetup = (_audioReader == nil);
-    CMSampleBufferRef buf = nil;
-    if (!needsSetup && _audioReader.status == AVAssetReaderStatusReading) {
-        buf = [_audioOutput copyNextSampleBuffer];
-    }
+    // Slice the exact bytes off the front of our buffer
+    void *slicedBytes = malloc(bytesNeeded);
+    [self.audioRingBuffer getBytes:slicedBytes length:bytesNeeded];
+    [self.audioRingBuffer replaceBytesInRange:NSMakeRange(0, bytesNeeded) withBytes:NULL length:0];
+
     os_unfair_lock_unlock(&_audioReaderLock);
 
-    if (needsSetup || !buf) {
-        NSString *path = self.currentMediaPath;
-        if (!path.length) return NULL;
-        [self _setupAudioReaderForPath:path matchingASBD:asbd];
-        os_unfair_lock_lock(&_audioReaderLock);
-        if (_audioReader && _audioReader.status == AVAssetReaderStatusReading) {
-            buf = [_audioOutput copyNextSampleBuffer];
-        }
-        os_unfair_lock_unlock(&_audioReaderLock);
-        if (!buf) return NULL;
-        
-        // Reset PTS tracker on loop/start to align with the current real-time mic timestamp
-        self.currentAudioPTS = originPTS;
-    }
+    // Package the sliced bytes into a native CMBlockBuffer
+    CMBlockBufferRef newBlockBuf = NULL;
+    CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
+                                       NULL, 
+                                       bytesNeeded,
+                                       kCFAllocatorDefault,
+                                       NULL,
+                                       0,
+                                       bytesNeeded,
+                                       kCMBlockBufferAssureMemoryNowFlag,
+                                       &newBlockBuf);
     
-    if (!CMTIME_IS_VALID(self.currentAudioPTS)) {
-        self.currentAudioPTS = originPTS;
-    }
+    CMBlockBufferReplaceDataBytes(slicedBytes, newBlockBuf, 0, bytesNeeded);
+    free(slicedBytes);
 
-    // Maintain contiguous audio restamping based on our internal tracker
+    // Restamp and finalize
+    CMSampleBufferRef injectedBuf = NULL;
     CMSampleTimingInfo timing;
-    CMSampleBufferGetSampleTimingInfo(buf, 0, &timing);
-    timing.presentationTimeStamp = self.currentAudioPTS;
-    
-    CMSampleBufferRef restamped = NULL;
-    CMSampleBufferCreateCopyWithNewTiming(kCFAllocatorDefault, buf, 1, &timing, &restamped);
-    CFRelease(buf);
-    
-    // Advance our PTS tracker by the duration of the chunk we just pulled
-    CMTime bufDur = CMSampleBufferGetDuration(restamped);
-    self.currentAudioPTS = CMTimeAdd(self.currentAudioPTS, bufDur);
+    CMSampleBufferGetSampleTimingInfo(origin, 0, &timing);
 
-    return restamped;
+    CMSampleBufferCreateReady(kCFAllocatorDefault,
+                              newBlockBuf,
+                              formatDesc,
+                              numSamples,
+                              1, &timing,
+                              0, NULL,
+                              &injectedBuf);
+
+    if (newBlockBuf) CFRelease(newBlockBuf);
+
+    return injectedBuf;
 }
 
 @end
@@ -425,6 +466,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 }
 
 %end
+
 
 %hook AVCapturePhotoOutput
 
@@ -548,23 +590,19 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
                           AVCaptureOutput *output,
                           CMSampleBufferRef sampleBuffer,
                           AVCaptureConnection *connection) {
+                            
                             DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
                             
                             if (mgr.active && mgr.currentMode == kDicoyModeMediaInject) {
-                                CMFormatDescriptionRef fd = CMSampleBufferGetFormatDescription(sampleBuffer);
-                                const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription((CMAudioFormatDescriptionRef)fd);
-                                
-                                // Pass sampleBuffer to sync real-time audio constraints
-                                CMSampleBufferRef injected = [mgr nextAudioSampleBufferMatchingASBD:asbd origin:sampleBuffer];
+                                CMSampleBufferRef injected = [mgr nextAudioSampleBufferMatchingOrigin:sampleBuffer];
                                 
                                 if (injected) {
                                     origIMP(self, @selector(captureOutput:didOutputSampleBuffer:fromConnection:), output, injected, connection);
                                     CFRelease(injected);
+                                    return; // Return early so real audio drops out completely
                                 }
-                                
-                                // Return early so the real microphone audio is muted
-                                return;
                             }
+                            
                             origIMP(self, @selector(captureOutput:didOutputSampleBuffer:fromConnection:), output, sampleBuffer, connection);
                         }),
                     (IMP *)&origIMP

@@ -5,7 +5,6 @@ include $(THEOS)/makefiles/common.mk
 
 SUBPROJECTS += DiCoyDaemon
 SUBPROJECTS += DiCoyTweak
-SUBPROJECTS += DiCoyMediaServerd
 SUBPROJECTS += DiCoyPrefs
 
 include $(THEOS)/makefiles/aggregate.mk
@@ -15,8 +14,7 @@ include $(THEOS)/makefiles/aggregate.mk
 # are not handled by Theos's binary install machinery.
 #
 # internal-stage:: runs during the staging phase and writes directly into
-# $(THEOS_STAGING_DIR), which is what dpkg-deb packages.
-before-package::
+# $(THEOS_STAGING_DIR), which is what dpkg-deb packages.  before-package::
 # fires after layout/ has already been copied into staging, so any files
 # written there at that point are too late — they never reach the deb.
 # -----------------------------------------------------------------------
