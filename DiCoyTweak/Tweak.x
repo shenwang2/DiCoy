@@ -40,9 +40,8 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock _videoReaderLock;
     os_unfair_lock _audioReaderLock;
     AVAssetReader            *_videoReader;
-    AVAssetReaderTrackOutput *_videoOut_BGRA;
-    AVAssetReaderTrackOutput *_videoOut_YUVvr;  // kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-    AVAssetReaderTrackOutput *_videoOut_YUVfr;  // kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+    AVAssetReaderTrackOutput *_videoOutput;
+    OSType                    _videoFormat;
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
 }
@@ -87,7 +86,8 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     if ([mode isEqualToString:@"mediaInject"]) {
         self.currentMode      = kDicoyModeMediaInject;
         self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
-        [self _setupVideoReaderForPath:self.currentMediaPath];
+        [self _setupVideoReaderForPath:self.currentMediaPath
+                           pixelFormat:kCVPixelFormatType_32BGRA];
     } else {
         self.currentMode = kDicoyModeScreenMirror;
         if ([self.client connect]) [self.client startCapture];
@@ -102,10 +102,9 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     [self.client disconnect];
     os_unfair_lock_lock(&_videoReaderLock);
     [_videoReader cancelReading];
-    _videoReader    = nil;
-    _videoOut_BGRA  = nil;
-    _videoOut_YUVvr = nil;
-    _videoOut_YUVfr = nil;
+    _videoReader  = nil;
+    _videoOutput  = nil;
+    _videoFormat  = 0;
     os_unfair_lock_unlock(&_videoReaderLock);
     os_unfair_lock_lock(&_audioReaderLock);
     [_audioReader cancelReading];
@@ -114,44 +113,27 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock_unlock(&_audioReaderLock);
 }
 
-- (void)_setupVideoReaderForPath:(NSString *)path {
+// One reader, one output, one pixel format. AVAssetReader forbids multiple
+// outputs for the same track. Format is detected from the first real incoming
+// frame and the reader is recreated if it changes (e.g. between sessions).
+- (void)_setupVideoReaderForPath:(NSString *)path pixelFormat:(OSType)fmt {
     if (!path.length) return;
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
     AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) return;
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
     if (!reader) return;
-
-    // Three outputs — one per pixel format so we can match whatever the app expects.
-    AVAssetReaderTrackOutput *outBGRA = [AVAssetReaderTrackOutput
+    AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput
         assetReaderTrackOutputWithTrack:track
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
-                         @(kCVPixelFormatType_32BGRA)}];
-    outBGRA.alwaysCopiesSampleData = NO;
-
-    AVAssetReaderTrackOutput *outYUVvr = [AVAssetReaderTrackOutput
-        assetReaderTrackOutputWithTrack:track
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
-                         @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)}];
-    outYUVvr.alwaysCopiesSampleData = NO;
-
-    AVAssetReaderTrackOutput *outYUVfr = [AVAssetReaderTrackOutput
-        assetReaderTrackOutputWithTrack:track
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey:
-                         @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)}];
-    outYUVfr.alwaysCopiesSampleData = NO;
-
-    [reader addOutput:outBGRA];
-    [reader addOutput:outYUVvr];
-    [reader addOutput:outYUVfr];
+        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(fmt)}];
+    out.alwaysCopiesSampleData = NO;
+    [reader addOutput:out];
     if (![reader startReading]) return;
-
     os_unfair_lock_lock(&_videoReaderLock);
     [_videoReader cancelReading];
-    _videoReader    = reader;
-    _videoOut_BGRA  = outBGRA;
-    _videoOut_YUVvr = outYUVvr;
-    _videoOut_YUVfr = outYUVfr;
+    _videoReader = reader;
+    _videoOutput = out;
+    _videoFormat = fmt;
     os_unfair_lock_unlock(&_videoReaderLock);
 }
 
@@ -184,26 +166,6 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     _audioReader = reader;
     _audioOutput = output;
     os_unfair_lock_unlock(&_audioReaderLock);
-}
-
-// Must be called while holding _videoReaderLock.
-- (AVAssetReaderTrackOutput *)_outputForSubtype:(OSType)sub {
-    switch (sub) {
-        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: return _videoOut_YUVvr;
-        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:  return _videoOut_YUVfr;
-        default:                                               return _videoOut_BGRA;
-    }
-}
-
-// Drain one frame from every output except `keep` so the AVAssetReader doesn't stall.
-// Must be called while holding _videoReaderLock.
-- (void)_drainOthersExcept:(AVAssetReaderTrackOutput *)keep {
-    for (AVAssetReaderTrackOutput *o in @[_videoOut_BGRA, _videoOut_YUVvr, _videoOut_YUVfr]) {
-        if (o && o != keep) {
-            CMSampleBufferRef b = [o copyNextSampleBuffer];
-            if (b) CFRelease(b);
-        }
-    }
 }
 
 // origin: real incoming sample buffer whose pixel format we match. Pass nil for the
@@ -251,35 +213,34 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 }
 
 - (CMSampleBufferRef)_nextVideoFrameForOrigin:(CMSampleBufferRef)origin {
-    // Derive pixel format from the incoming buffer (nil → BGRA for display layer).
+    // Derive pixel format from the real incoming buffer (nil → BGRA for display layer).
     OSType sub = kCVPixelFormatType_32BGRA;
     if (origin) {
         CMFormatDescriptionRef fd = CMSampleBufferGetFormatDescription(origin);
         if (fd) sub = CMFormatDescriptionGetMediaSubType(fd);
     }
 
+    // Fast path: reader exists, format matches, not at EOF.
     os_unfair_lock_lock(&_videoReaderLock);
-    BOOL ok = _videoReader && _videoReader.status == AVAssetReaderStatusReading;
-    AVAssetReaderTrackOutput *sel = ok ? [self _outputForSubtype:sub] : nil;
-    CMSampleBufferRef fileBuf = sel ? [sel copyNextSampleBuffer] : nil;
-    if (ok && fileBuf) [self _drainOthersExcept:sel];
+    BOOL ok = _videoReader
+           && (_videoReader.status == AVAssetReaderStatusReading)
+           && (_videoFormat == sub);
+    CMSampleBufferRef fileBuf = ok ? [_videoOutput copyNextSampleBuffer] : nil;
     os_unfair_lock_unlock(&_videoReaderLock);
 
     if (!fileBuf) {
-        // EOF or reader not yet initialised — restart the reader and retry once.
+        // EOF, wrong format, or not yet initialised — recreate with the correct format.
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
-        [self _setupVideoReaderForPath:path];
+        [self _setupVideoReaderForPath:path pixelFormat:sub];
         os_unfair_lock_lock(&_videoReaderLock);
-        ok = _videoReader && _videoReader.status == AVAssetReaderStatusReading;
-        sel = ok ? [self _outputForSubtype:sub] : nil;
-        fileBuf = sel ? [sel copyNextSampleBuffer] : nil;
-        if (ok && fileBuf) [self _drainOthersExcept:sel];
+        ok = _videoReader && (_videoReader.status == AVAssetReaderStatusReading);
+        fileBuf = ok ? [_videoOutput copyNextSampleBuffer] : nil;
         os_unfair_lock_unlock(&_videoReaderLock);
         if (!fileBuf) return NULL;
     }
 
-    // Build timing: mirror the origin buffer's PTS so apps don't reject the frame.
+    // Mirror timing from the real buffer so the app's pipeline accepts the frame.
     CMSampleTimingInfo timing;
     if (origin) {
         timing = (CMSampleTimingInfo){
@@ -304,7 +265,6 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
         CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pix, true, NULL, NULL,
                                            fmt, &timing, &result);
         CFRelease(fmt);
-        // Propagate EXIF/TIFF so still-photo captures look authentic.
         if (result && origin) {
             CFDictionaryRef exif = CMGetAttachment(origin, CFSTR("{Exif}"), NULL);
             CFDictionaryRef tiff = CMGetAttachment(origin, CFSTR("{TIFF}"), NULL);
