@@ -2,6 +2,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <substrate.h>
 #import <os/log.h>
+#include <dlfcn.h>
 
 static os_log_t gMediaLog;
 
