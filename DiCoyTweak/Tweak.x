@@ -96,16 +96,26 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     
     if ([mode isEqualToString:@"off"]) return;
     
-    // --- AltList Per-App Filtering ---
+    // --- AltList Per-App Filtering (Crash-Proof) ---
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    if (!bundleID) return; // Safety check for daemons without a bundle ID
+    if (!bundleID) return; // Safety check for background daemons
     
-    NSDictionary *enabledApps = prefs[@"enabledApps"];
-    BOOL isAppEnabled = [enabledApps[bundleID] boolValue];
+    id enabledApps = prefs[@"enabledApps"];
+    BOOL isAppEnabled = NO;
+    
+    // Safely check the type of data AltList saved to prevent unrecognized selector crashes
+    if ([enabledApps isKindOfClass:[NSDictionary class]]) {
+        isAppEnabled = [enabledApps[bundleID] boolValue];
+    } else if ([enabledApps isKindOfClass:[NSArray class]]) {
+        isAppEnabled = [(NSArray *)enabledApps containsObject:bundleID];
+    } else if ([enabledApps isKindOfClass:[NSString class]]) {
+        isAppEnabled = [(NSString *)enabledApps isEqualToString:bundleID];
+    }
     
     if (!isAppEnabled) {
-        return; // App is not toggled on in settings, stay dormant.
+        return; // App is not toggled on, remain dormant.
     }
+    // -----------------------------------------------
     
     self.active = YES;
     
