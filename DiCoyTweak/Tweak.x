@@ -621,14 +621,14 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 - (instancetype)initWithSession:(AVCaptureSession *)session {
     self = %orig;
     if (self) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [(id)self _dicoyInstall]; });
     }
     return self;
 }
 
 - (void)setSession:(AVCaptureSession *)session {
     %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [(id)self _dicoyInstall]; });
 }
 
 %new
