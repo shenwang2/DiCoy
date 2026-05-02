@@ -40,14 +40,14 @@ jobs:
 
       - name: Build and install libSandy
         run: |
-          # theos/sdks trimmed package omits usr/include, so xpc/xpc.h is missing.
-          # Theos ignores a command-line SYSROOT override; it always computes its own
-          # sysroot as $THEOS/sdks/iPhoneOS<ver>.sdk. Patch that directory in-place
-          # with headers from Xcode's full bundled iOS SDK (present on all macos runners).
+          # theos/sdks omits usr/include/xpc. Copy it from Xcode's full iOS SDK,
+          # then strip every API_UNAVAILABLE(...ios...) annotation — those functions
+          # ARE available on iOS at runtime; Apple only hides them from app builds.
           IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
-          rsync -a --ignore-existing "$IOS_SDK/usr/include/" \
-            "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include/"
+          cp -r "$IOS_SDK/usr/include/xpc" "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include/"
+          find "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include/xpc" -name "*.h" | \
+            xargs sed -i '' 's/API_UNAVAILABLE([^)]*ios[^)]*)//g'
           cd vendor/libSandy
           make clean 2>/dev/null || true
           make \
