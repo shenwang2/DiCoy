@@ -594,6 +594,12 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 %end
 
 
+// Forward-declare the %new method so blocks that call [self _dicoyInstall]
+// compile without -Wundeclared-selector errors.
+@interface AVCaptureVideoPreviewLayer (DiCoyInstall)
+- (void)_dicoyInstall;
+@end
+
 // AVCaptureVideoPreviewLayer hook — covers the native Camera app viewfinder and any
 // other app that uses a preview layer rather than AVCaptureVideoDataOutput.
 // Hooks initWithSession: and setSession: so the display layer is installed as soon
@@ -621,14 +627,14 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 - (instancetype)initWithSession:(AVCaptureSession *)session {
     self = %orig;
     if (self) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [(id)self _dicoyInstall]; });
+        dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
     }
     return self;
 }
 
 - (void)setSession:(AVCaptureSession *)session {
     %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ [(id)self _dicoyInstall]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
 }
 
 %new
