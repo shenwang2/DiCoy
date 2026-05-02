@@ -79,8 +79,16 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 
 - (void)startMirroring {
     if (self.active) return;
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
+    // Try the JB-prefixed path first; fall back to the cfprefsd path in case
+    // Settings.app couldn't write to the JB prefix (permission issue on some setups).
+    NSDictionary *prefs =
+        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH]
+        ?: [NSDictionary dictionaryWithContentsOfFile:
+               @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist"]
+        ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
+    [mode writeToFile:@"/var/tmp/dicoy_mode.txt"
+           atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if ([mode isEqualToString:@"off"]) return;
     self.active = YES;
     if ([mode isEqualToString:@"mediaInject"]) {
@@ -597,6 +605,19 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
 }
 
+- (void)setSessionWithNoConnection:(AVCaptureSession *)session {
+    %orig;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
+}
+
+// layoutSublayers fires on the main thread every time the layer lays out —
+// guaranteed to fire once the preview layer is in the view hierarchy, regardless
+// of which session-attachment API the app used.
+- (void)layoutSublayers {
+    %orig;
+    [self _dicoyInstall];
+}
+
 %new
 - (void)dicoyStep:(CADisplayLink *)sender {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
@@ -639,7 +660,11 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
                                  const void              *object,
                                  CFDictionaryRef          userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
+    NSDictionary *prefs =
+        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH]
+        ?: [NSDictionary dictionaryWithContentsOfFile:
+               @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist"]
+        ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
     // Always stop first so startMirroring can re-read the new prefs cleanly.
     if (mgr.active) [mgr stopMirroring];
@@ -647,6 +672,10 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
 }
 
 %ctor {
+    // One-shot: tells us which process loaded the tweak. Check via: cat /var/tmp/dicoy_proc.txt
+    [[NSString stringWithFormat:@"%@", NSProcessInfo.processInfo.processName]
+     writeToFile:@"/var/tmp/dicoy_proc.txt"
+     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     // Consume libSandy sandbox extensions before hooks register so that prefs
     // file access, socket connect, and IOSurfaceLookup are all unlocked by the
     // time any hook-initiated code runs.
