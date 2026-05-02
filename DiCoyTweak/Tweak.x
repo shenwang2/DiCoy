@@ -14,6 +14,7 @@
 #import <libSandy.h>
 
 static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
+static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 
 // =========================================================================
 // DiCoyTweakManager
@@ -78,16 +79,6 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 }
 
 - (void)startMirroring {
-    // Step 3a: prove startMirroring is entered — fixed string, no nil dependency.
-    [@"startMirroring entered" writeToFile:@"/var/tmp/dicoy_start.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    // Step 3b: read prefs and report success or sandbox error.
-    NSError *_prefsErr = nil;
-    NSString *_rawPrefs = [NSString stringWithContentsOfFile:@DICOY_PREFS_PATH
-                                                   encoding:NSUTF8StringEncoding error:&_prefsErr];
-    [(_rawPrefs ?: [NSString stringWithFormat:@"READ FAILED: %@", _prefsErr])
-     writeToFile:@"/var/tmp/dicoy_prefs.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (self.active) return;
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
@@ -218,9 +209,6 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 // origin: real incoming sample buffer whose pixel format we match. Pass nil for the
 // AVSampleBufferDisplayLayer path (defaults to BGRA, which the display layer accepts).
 - (CMSampleBufferRef)buildSampleBufferMatchingBuffer:(CMSampleBufferRef)origin {
-    // Step 5: prove this method is reached.
-    [@"buildSampleBuffer called" writeToFile:@"/var/tmp/dicoy_build.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (!self.active) return NULL;
 
     if (self.currentMode == kDicoyModeMediaInject) {
@@ -372,9 +360,6 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 %hook AVCaptureSession
 
 - (void)startRunning {
-    // Step 2: prove AVCaptureSession -startRunning hook fires.
-    [@"startRunning fired" writeToFile:@"/var/tmp/dicoy_session.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
     %orig;
     [[DiCoyTweakManager sharedManager] startMirroring];
 }
@@ -611,34 +596,39 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
 
 // AVCaptureVideoPreviewLayer hook — covers the native Camera app viewfinder and any
 // other app that uses a preview layer rather than AVCaptureVideoDataOutput.
-// Injects an AVSampleBufferDisplayLayer overlay driven by a CADisplayLink.
+// Hooks initWithSession: and setSession: so the display layer is installed as soon
+// as the preview layer is wired to a capture session, before startRunning fires.
 %hook AVCaptureVideoPreviewLayer
 
-- (void)addSublayer:(CALayer *)layer {
-    // Step 4: prove AVCaptureVideoPreviewLayer -addSublayer: fires.
-    [@"addSublayer fired" writeToFile:@"/var/tmp/dicoy_previewlayer.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    %orig;
-    // Only set up once per preview layer instance.
+%new
+- (void)_dicoyInstall {
     if (objc_getAssociatedObject(self, kDiCoyDisplayLayerKey)) return;
 
-    AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer new];
-    // Start invisible — opacity is raised to 1.0 only when a real frame is
-    // successfully enqueued. No mask layer: without content the display layer
-    // is fully transparent, so the real camera preview shows through unobstructed.
-    displayLayer.opacity = 0.0f;
-    [self insertSublayer:displayLayer above:layer];
-
-    objc_setAssociatedObject(self, kDiCoyDisplayLayerKey, displayLayer,
+    AVSampleBufferDisplayLayer *dl = [AVSampleBufferDisplayLayer new];
+    dl.frame   = self.bounds;
+    dl.opacity = 0.0f;
+    [self addSublayer:dl];
+    objc_setAssociatedObject(self, kDiCoyDisplayLayerKey, dl,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        displayLayer.frame = self.bounds;
-    });
 
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self
                                                       selector:@selector(dicoyStep:)];
-    [link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+    [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    objc_setAssociatedObject(self, kDiCoyDisplayLinkKey, link,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (instancetype)initWithSession:(AVCaptureSession *)session {
+    self = %orig;
+    if (self) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
+    }
+    return self;
+}
+
+- (void)setSession:(AVCaptureSession *)session {
+    %orig;
+    dispatch_async(dispatch_get_main_queue(), ^{ [self _dicoyInstall]; });
 }
 
 %new
@@ -656,7 +646,7 @@ static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
     dLayer.frame = self.bounds;
 
     static CFTimeInterval lastRefresh = 0;
-    CFTimeInterval now = CACurrentMediaTime();
+    CFTimeInterval now = sender.timestamp;
     if (now - lastRefresh < 1.0 / DICOY_TARGET_FPS) return;
     if (!dLayer.readyForMoreMediaData) return;
     lastRefresh = now;
@@ -691,11 +681,6 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
 }
 
 %ctor {
-    // Step 1: prove the dylib loads and which process it's in.
-    [[NSString stringWithFormat:@"%@ loaded", [NSProcessInfo processInfo].processName]
-     writeToFile:@"/var/tmp/dicoy_load.txt"
-     atomically:YES encoding:NSUTF8StringEncoding error:nil];
-
     // Consume libSandy sandbox extensions before hooks register so that prefs
     // file access, socket connect, and IOSurfaceLookup are all unlocked by the
     // time any hook-initiated code runs.
