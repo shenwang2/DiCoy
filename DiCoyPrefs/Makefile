@@ -9,6 +9,11 @@ DiCoyPrefs_FILES      = DiCoyPrefsListController.m
 DiCoyPrefs_FRAMEWORKS         = Foundation UIKit
 DiCoyPrefs_PRIVATE_FRAMEWORKS = Preferences
 
+# --- AltList Linking ---
+DiCoyPrefs_EXTRA_FRAMEWORKS = AltList
+DiCoyPrefs_LDFLAGS += -F$(THEOS_PROJECT_DIR)/vendor
+# -----------------------
+
 DiCoyPrefs_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)/DiCoyTweak
 
 DiCoyPrefs_RESOURCE_DIRS = Resources
