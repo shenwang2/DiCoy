@@ -57,7 +57,7 @@ Media Inject plays a local video or image file instead.</string>
             <key>cell</key>
             <string>PSLinkCell</string>
             <key>detail</key>
-            <string>ATLApplicationListSelectionController</string>
+            <string>ATLApplicationListMultiSelectionController</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
             <key>key</key>
@@ -69,6 +69,7 @@ Media Inject plays a local video or image file instead.</string>
             <key>alphabeticIndexingEnabled</key>
             <true/>
         </dict>
+
         <dict>
             <key>cell</key>
             <string>PSGroupCell</string>
