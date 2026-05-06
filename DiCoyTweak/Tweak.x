@@ -33,6 +33,8 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 @property (nonatomic, assign)  BOOL active;
 @property (nonatomic, assign)  DicoyMode currentMode;
 @property (nonatomic, copy)    NSString *currentMediaPath;
+@property (nonatomic, strong)  NSURL         *recordingOutputURL;
+@property (nonatomic, assign)  CFAbsoluteTime  recordingStartTime;
 @end
 
 @implementation DiCoyTweakManager {
@@ -318,6 +320,51 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     return restamped;
 }
 
+// Build a looping composition of the injected video that fills `duration` seconds,
+// delete Camera.app's raw output, export ours to the same URL, then call completion.
+// Used to replace AVCaptureMovieFileOutput recordings after they finish.
+- (void)_replaceVideoAtURL:(NSURL *)outputURL
+                  duration:(NSTimeInterval)duration
+                completion:(dispatch_block_t)completion {
+    if (!self.currentMediaPath.length || duration <= 0) {
+        if (completion) completion(); return;
+    }
+    AVURLAsset *src = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:self.currentMediaPath]
+                                          options:nil];
+    double srcSec = CMTimeGetSeconds(src.duration);
+    if (srcSec <= 0) { if (completion) completion(); return; }
+
+    AVMutableComposition *comp = [AVMutableComposition composition];
+    AVAssetTrack *srcV = [[src tracksWithMediaType:AVMediaTypeVideo] firstObject];
+    AVAssetTrack *srcA = [[src tracksWithMediaType:AVMediaTypeAudio] firstObject];
+    AVMutableCompositionTrack *compV = srcV
+        ? [comp addMutableTrackWithMediaType:AVMediaTypeVideo
+                             preferredTrackID:kCMPersistentTrackID_Invalid] : nil;
+    AVMutableCompositionTrack *compA = srcA
+        ? [comp addMutableTrackWithMediaType:AVMediaTypeAudio
+                             preferredTrackID:kCMPersistentTrackID_Invalid] : nil;
+
+    CMTime cursor = kCMTimeZero;
+    double filled = 0.0;
+    while (filled < duration) {
+        double seg = MIN(duration - filled, srcSec);
+        CMTimeRange r = CMTimeRangeMake(kCMTimeZero, CMTimeMakeWithSeconds(seg, 600));
+        if (compV && srcV) [compV insertTimeRange:r ofTrack:srcV atTime:cursor error:nil];
+        if (compA && srcA) [compA insertTimeRange:r ofTrack:srcA atTime:cursor error:nil];
+        cursor = CMTimeAdd(cursor, CMTimeMakeWithSeconds(seg, 600));
+        filled += seg;
+    }
+
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    AVAssetExportSession *exp = [AVAssetExportSession exportSessionWithAsset:comp
+                                                                  presetName:AVAssetExportPresetHighestQuality];
+    exp.outputURL      = outputURL;
+    exp.outputFileType = AVFileTypeQuickTimeMovie;
+    [exp exportAsynchronouslyWithCompletionHandler:^{
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(); });
+    }];
+}
+
 @end
 
 
@@ -420,8 +467,9 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
                     if (mgr.active) {
                         // Static slots updated on every capture; read by the
                         // AVCapturePhoto method hooks below.
-                        static NSData       *sJpegData = nil;
-                        static CVPixelBufferRef sInjPix = nil;
+                        static NSData          *sJpegData = nil;
+                        static CVPixelBufferRef sInjPix   = nil;
+                        static UIImage         *sUIImage  = nil;
 
                         // Build a synthetic origin buffer matching the photo's
                         // pixel format so _nextVideoFrameForOrigin: picks the
@@ -449,11 +497,13 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
                                 CVPixelBufferRef old = sInjPix;
                                 sInjPix = (CVPixelBufferRef)CFRetain(injPix);
                                 if (old) CFRelease(old);
-                                // Build JPEG for file-data path.
+                                // Build UIImage once; JPEG for fileDataRepresentation path,
+                                // CGImage for CGImageRepresentation path (Camera.app).
                                 CIImage  *ci = [CIImage imageWithCVImageBuffer:injPix];
                                 UIImage  *ui = [UIImage imageWithCIImage:ci scale:1.0
                                                             orientation:UIImageOrientationUp];
                                 sJpegData = UIImageJPEGRepresentation(ui, 0.95);
+                                sUIImage  = ui;
                             }
                             CFRelease(injected);
 
@@ -489,6 +539,18 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
                                         if (m.active && sInjPix) return sInjPix;
                                         return origPB(s, @selector(pixelBuffer));
                                     }), (IMP *)&origPB);
+
+                                // Camera.app calls CGImageRepresentation rather than
+                                // fileDataRepresentation when building its photo preview
+                                // and for some photo-library save paths.
+                                __block CGImageRef (*origCGImg)(id, SEL) = nil;
+                                MSHookMessageEx([photo class],
+                                    @selector(CGImageRepresentation),
+                                    imp_implementationWithBlock(^CGImageRef(id s) {
+                                        DiCoyTweakManager *m = [DiCoyTweakManager sharedManager];
+                                        if (m.active && sUIImage) return [sUIImage CGImage];
+                                        return origCGImg(s, @selector(CGImageRepresentation));
+                                    }), (IMP *)&origCGImg);
                             }
                         }
                     }
@@ -552,6 +614,69 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
                                     output, sampleBuffer, connection);
                         }),
                     (IMP *)&origIMP
+                );
+            }
+        }
+    }
+    %orig;
+}
+
+%end
+
+
+// =========================================================================
+// AVCaptureMovieFileOutput hook — Camera.app records video through this output,
+// which writes directly to a file via hardware encoders with no sample-buffer
+// delegate.  We hook the recording-delegate completion and replace the raw
+// .mov with a looped/trimmed version of the injected video before Camera.app
+// hands the file to PHPhotoLibrary.
+// =========================================================================
+
+%hook AVCaptureMovieFileOutput
+
+- (void)startRecordingToOutputFileURL:(NSURL *)outputFileURL
+                    recordingDelegate:(id<AVCaptureFileOutputRecordingDelegate>)delegate {
+    DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+    if (mgr.active && mgr.currentMode == kDicoyModeMediaInject && delegate) {
+        mgr.recordingOutputURL  = outputFileURL;
+        mgr.recordingStartTime  = CFAbsoluteTimeGetCurrent();
+
+        static NSMutableSet   *hookedRecClasses;
+        static dispatch_once_t recOnce;
+        dispatch_once(&recOnce, ^{ hookedRecClasses = [NSMutableSet new]; });
+        NSString *cls = NSStringFromClass([delegate class]);
+        @synchronized(hookedRecClasses) {
+            if (![hookedRecClasses containsObject:cls]) {
+                [hookedRecClasses addObject:cls];
+                __block void (*origRec)(id, SEL,
+                                        AVCaptureFileOutput *,
+                                        NSURL *,
+                                        NSArray *,
+                                        NSError *) = nil;
+                MSHookMessageEx(
+                    [delegate class],
+                    @selector(fileOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:),
+                    imp_implementationWithBlock(
+                        ^(id bSelf,
+                          AVCaptureFileOutput *output,
+                          NSURL *url,
+                          NSArray *connections,
+                          NSError *error) {
+                            DiCoyTweakManager *m = [DiCoyTweakManager sharedManager];
+                            if (m.active && m.currentMode == kDicoyModeMediaInject && !error) {
+                                NSTimeInterval dur = CFAbsoluteTimeGetCurrent() - m.recordingStartTime;
+                                [m _replaceVideoAtURL:url duration:dur completion:^{
+                                    origRec(bSelf,
+                                            @selector(fileOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:),
+                                            output, url, connections, nil);
+                                }];
+                            } else {
+                                origRec(bSelf,
+                                        @selector(fileOutput:didFinishRecordingToOutputFileAtURL:fromConnections:error:),
+                                        output, url, connections, error);
+                            }
+                        }),
+                    (IMP *)&origRec
                 );
             }
         }

@@ -1,4 +1,4 @@
-# DiCoy BETA / ONLY MEDIA INJECTION WORKING AND ONLY IN SOME APPS
+# DiCoy
 
 A rootless / rootful iOS jailbreak tweak (iOS 15.0–17.0, arm64 / arm64e) that replaces the camera and microphone feeds in any AVFoundation-based app with either a **live mirror of the device screen** or a **local video/audio file**, using a zero-copy multi-process architecture.
 
