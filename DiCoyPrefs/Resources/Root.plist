@@ -69,6 +69,33 @@
 
         <dict>
             <key>cell</key>
+            <string>PSSegmentCell</string>
+            <key>label</key>
+            <string>Rotate</string>
+            <key>key</key>
+            <string>videoRotation</string>
+            <key>default</key>
+            <string>default</string>
+            <key>defaults</key>
+            <string>com.dicoy.prefs</string>
+            <key>validValues</key>
+            <array>
+                <string>default</string>
+                <string>ccw</string>
+                <string>cw</string>
+                <string>upsideDown</string>
+            </array>
+            <key>validTitles</key>
+            <array>
+                <string>Default</string>
+                <string>Counter-Clock</string>
+                <string>Clock-Wise</string>
+                <string>Upside-Down</string>
+            </array>
+        </dict>
+
+        <dict>
+            <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
             <string>Capture Settings</string>
