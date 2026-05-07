@@ -1,0 +1,60 @@
+#!/bin/sh
+set -e
+
+# Detect jailbreak root prefix at install time so this works on both
+# rootless (Dopamine, palera1n rootless) and rootful (checkra1n etc.).
+if [ -d /var/jb ] && [ -d /var/jb/Library ]; then
+    P="/var/jb"
+else
+    P=""
+fi
+
+SANDY_DIR="${P}/Library/libSandy"
+mkdir -p "$SANDY_DIR"
+
+# Write the Sandy sandbox-extension profile.
+# sandyd (from com.opa334.libsandy) reads profiles from JBROOT/Library/libSandy/<name>.plist
+# and rejects any file where st_uid != 0 || st_gid != 0.  On iOS, GID 0 = wheel;
+# this script runs as root (uid=0, gid=0) so the created file satisfies both checks.
+cat > "${SANDY_DIR}/DiCoy.plist" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AllowedProcesses</key>
+	<array>
+		<string>*</string>
+	</array>
+	<key>Extensions</key>
+	<array>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>${P}/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>${P}/var/run/dicoy.sock</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>iokit_user_client</string>
+			<key>extension_class</key>
+			<string>com.apple.security.exception.iokit-user-client-class</string>
+			<key>registry_entry_class</key>
+			<string>IOSurfaceRootUserClient</string>
+		</dict>
+	</array>
+</dict>
+</plist>
+PLISTEOF
+
+chown root:wheel "${SANDY_DIR}/DiCoy.plist"
+chmod 644 "${SANDY_DIR}/DiCoy.plist"
