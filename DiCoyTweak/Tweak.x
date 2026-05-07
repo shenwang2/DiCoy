@@ -11,6 +11,7 @@
 #import <objc/runtime.h>
 #import "DiCoyClient.h"
 #import "DiCoyProtocol.h"
+#import <substrate.h>
 #import <libSandy.h>
 
 static const void *kDiCoyDisplayLayerKey = &kDiCoyDisplayLayerKey;
