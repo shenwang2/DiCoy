@@ -41,11 +41,15 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock _surfaceLock;
     os_unfair_lock _videoReaderLock;
     os_unfair_lock _audioReaderLock;
+    os_unfair_lock _previewFrameLock;
     AVAssetReader            *_videoReader;
     AVAssetReaderTrackOutput *_videoOutput;
     OSType                    _videoFormat;
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
+    CMSampleBufferRef         _lastInjectedFrame; // latest video frame; display link reads this
+    CMTime                    _audioNextPTS;       // running PTS for injected audio
+    BOOL                      _audioPTSValid;
 }
 
 + (instancetype)sharedManager {
@@ -58,9 +62,10 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _surfaceLock     = OS_UNFAIR_LOCK_INIT;
-        _videoReaderLock = OS_UNFAIR_LOCK_INIT;
-        _audioReaderLock = OS_UNFAIR_LOCK_INIT;
+        _surfaceLock      = OS_UNFAIR_LOCK_INIT;
+        _videoReaderLock  = OS_UNFAIR_LOCK_INIT;
+        _audioReaderLock  = OS_UNFAIR_LOCK_INIT;
+        _previewFrameLock = OS_UNFAIR_LOCK_INIT;
         _client = [DiCoyClient new];
         __weak typeof(self) weak = self;
         _client.frameCallback = ^(IOSurfaceRef surface, uint16_t w, uint16_t h) {
@@ -121,6 +126,12 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     _audioReader = nil;
     _audioOutput = nil;
     os_unfair_lock_unlock(&_audioReaderLock);
+    os_unfair_lock_lock(&_previewFrameLock);
+    CMSampleBufferRef oldFrame = _lastInjectedFrame;
+    _lastInjectedFrame = nil;
+    os_unfair_lock_unlock(&_previewFrameLock);
+    if (oldFrame) CFRelease(oldFrame);
+    _audioPTSValid = NO;
 }
 
 // One reader, one output, one pixel format. AVAssetReader forbids multiple
@@ -184,6 +195,17 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     if (!self.active) return NULL;
 
     if (self.currentMode == kDicoyModeMediaInject) {
+        if (origin == nil) {
+            // Display-link preview: return the last frame the camera hook produced
+            // without advancing the reader, eliminating reader contention.
+            os_unfair_lock_lock(&_previewFrameLock);
+            CMSampleBufferRef cached = _lastInjectedFrame
+                ? (CMSampleBufferRef)CFRetain(_lastInjectedFrame) : NULL;
+            os_unfair_lock_unlock(&_previewFrameLock);
+            // Fall through to reader if no camera hook has produced a frame yet
+            // (preview-layer-only apps with no AVCaptureVideoDataOutput).
+            if (cached) return cached;
+        }
         return [self _nextVideoFrameForOrigin:origin];
     }
 
@@ -283,6 +305,13 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
         }
     }
     CFRelease(fileBuf);
+    if (result) {
+        os_unfair_lock_lock(&_previewFrameLock);
+        CMSampleBufferRef old = _lastInjectedFrame;
+        _lastInjectedFrame = (CMSampleBufferRef)CFRetain(result);
+        os_unfair_lock_unlock(&_previewFrameLock);
+        if (old) CFRelease(old);
+    }
     return result;
 }
 
@@ -308,10 +337,21 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     }
 
     CMTime dur = CMSampleBufferGetDuration(buf);
-    if (!CMTIME_IS_VALID(dur) || CMTIME_IS_INDEFINITE(dur)) dur = kCMTimeZero;
+    if (!CMTIME_IS_VALID(dur) || CMTIME_IS_INDEFINITE(dur))
+        dur = CMTimeMake(1024, 44100); // fallback: 1024 samples @ 44.1 kHz
+
+    // Anchor PTS on first buffer; increment by exact duration each call so the
+    // pipeline sees a gapless, jitter-free audio stream.
+    if (!_audioPTSValid) {
+        _audioNextPTS  = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000);
+        _audioPTSValid = YES;
+    }
+    CMTime pts    = _audioNextPTS;
+    _audioNextPTS = CMTimeAdd(pts, dur);
+
     CMSampleTimingInfo timing = {
         .duration              = dur,
-        .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
+        .presentationTimeStamp = pts,
         .decodeTimeStamp       = kCMTimeInvalid,
     };
     CMSampleBufferRef restamped = NULL;
@@ -369,6 +409,71 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 
 
 // =========================================================================
+// Unified delegate hook
+//
+// MSHookMessageEx patches the method table. If two separate hooks both call
+// it on the same class+selector (e.g., when the same delegate class handles
+// both AVCaptureVideoDataOutput and AVCaptureAudioDataOutput), the second
+// call chains onto the first: audio_hook → video_hook → original. A VIDEO
+// buffer reaching the audio_hook produces a NULL ASBD; an audio buffer is
+// fetched and delivered as video — corruption/crash. Fix: one class registry,
+// one IMP per class that dispatches on the output type.
+// =========================================================================
+
+static NSMutableSet   *gHookedDelegateClasses;
+static dispatch_once_t gHookedDelegateOnce;
+
+static void dicoyHookDelegate(Class cls) {
+    if (!cls) return;
+    dispatch_once(&gHookedDelegateOnce, ^{ gHookedDelegateClasses = [NSMutableSet new]; });
+    NSString *name = NSStringFromClass(cls);
+    @synchronized(gHookedDelegateClasses) {
+        if ([gHookedDelegateClasses containsObject:name]) return;
+        [gHookedDelegateClasses addObject:name];
+    }
+    __block void (*origIMP)(id, SEL, AVCaptureOutput *,
+                            CMSampleBufferRef,
+                            AVCaptureConnection *) = nil;
+    MSHookMessageEx(
+        cls,
+        @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
+        imp_implementationWithBlock(
+            ^(id blockSelf,
+              AVCaptureOutput *output,
+              CMSampleBufferRef sampleBuffer,
+              AVCaptureConnection *connection) {
+                DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+                CMSampleBufferRef injected = nil;
+                if (mgr.active) {
+                    if (mgr.currentMode == kDicoyModeMediaInject) {
+                        if ([output isKindOfClass:[AVCaptureVideoDataOutput class]]) {
+                            injected = [mgr buildSampleBufferMatchingBuffer:sampleBuffer];
+                        } else if ([output isKindOfClass:[AVCaptureAudioDataOutput class]]) {
+                            CMFormatDescriptionRef fd =
+                                CMSampleBufferGetFormatDescription(sampleBuffer);
+                            const AudioStreamBasicDescription *asbd =
+                                CMAudioFormatDescriptionGetStreamBasicDescription(
+                                    (CMAudioFormatDescriptionRef)fd);
+                            injected = [mgr nextAudioSampleBufferMatchingASBD:asbd];
+                        }
+                    } else if (mgr.currentMode == kDicoyModeScreenMirror) {
+                        if ([output isKindOfClass:[AVCaptureVideoDataOutput class]]) {
+                            injected = [mgr buildSampleBufferMatchingBuffer:sampleBuffer];
+                        }
+                        // Screen mirror: audio passes through unchanged
+                    }
+                }
+                origIMP(blockSelf,
+                        @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
+                        output, injected ?: sampleBuffer, connection);
+                if (injected) CFRelease(injected);
+            }),
+        (IMP *)&origIMP
+    );
+}
+
+
+// =========================================================================
 // Logos hooks
 // =========================================================================
 
@@ -380,54 +485,18 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 }
 
 - (void)stopRunning {
+    %orig; // stop the session first so all in-flight callbacks drain before teardown
     [[DiCoyTweakManager sharedManager] stopMirroring];
-    %orig;
 }
 
 %end
 
 
-// Hook the VIDEO delegate's sample buffer method directly via MSHookMessageEx,
-// matching what VCAM does. Avoids the proxy-object approach and its edge cases.
 %hook AVCaptureVideoDataOutput
 
 - (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate
                           queue:(dispatch_queue_t)queue {
-    if (delegate && queue) {
-        static NSMutableSet *hookedClasses;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ hookedClasses = [NSMutableSet new]; });
-
-        NSString *clsName = NSStringFromClass([delegate class]);
-        @synchronized(hookedClasses) {
-            if (![hookedClasses containsObject:clsName]) {
-                [hookedClasses addObject:clsName];
-                __block void (*origIMP)(id, SEL, AVCaptureOutput *,
-                                        CMSampleBufferRef,
-                                        AVCaptureConnection *) = nil;
-                MSHookMessageEx(
-                    [delegate class],
-                    @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
-                    imp_implementationWithBlock(
-                        ^(id self,
-                          AVCaptureOutput *output,
-                          CMSampleBufferRef sampleBuffer,
-                          AVCaptureConnection *connection) {
-                            CMSampleBufferRef injected =
-                                [[DiCoyTweakManager sharedManager]
-                                 buildSampleBufferMatchingBuffer:sampleBuffer];
-                            origIMP(self,
-                                    @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
-                                    output,
-                                    injected ?: sampleBuffer,
-                                    connection);
-                            if (injected) CFRelease(injected);
-                        }),
-                    (IMP *)&origIMP
-                );
-            }
-        }
-    }
+    if (delegate && queue) dicoyHookDelegate([delegate class]);
     %orig;
 }
 
@@ -567,57 +636,11 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 %end
 
 
-// Same pattern for the AUDIO delegate.
 %hook AVCaptureAudioDataOutput
 
 - (void)setSampleBufferDelegate:(id<AVCaptureAudioDataOutputSampleBufferDelegate>)delegate
                           queue:(dispatch_queue_t)queue {
-    if (delegate && queue) {
-        static NSMutableSet *hookedClasses;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{ hookedClasses = [NSMutableSet new]; });
-
-        NSString *clsName = NSStringFromClass([delegate class]);
-        @synchronized(hookedClasses) {
-            if (![hookedClasses containsObject:clsName]) {
-                [hookedClasses addObject:clsName];
-                __block void (*origIMP)(id, SEL, AVCaptureOutput *,
-                                        CMSampleBufferRef,
-                                        AVCaptureConnection *) = nil;
-                MSHookMessageEx(
-                    [delegate class],
-                    @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
-                    imp_implementationWithBlock(
-                        ^(id self,
-                          AVCaptureOutput *output,
-                          CMSampleBufferRef sampleBuffer,
-                          AVCaptureConnection *connection) {
-                            DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
-                            if (mgr.active && mgr.currentMode == kDicoyModeMediaInject) {
-                                CMFormatDescriptionRef fd =
-                                    CMSampleBufferGetFormatDescription(sampleBuffer);
-                                const AudioStreamBasicDescription *asbd =
-                                    CMAudioFormatDescriptionGetStreamBasicDescription(
-                                        (CMAudioFormatDescriptionRef)fd);
-                                CMSampleBufferRef injected =
-                                    [mgr nextAudioSampleBufferMatchingASBD:asbd];
-                                if (injected) {
-                                    origIMP(self,
-                                            @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
-                                            output, injected, connection);
-                                    CFRelease(injected);
-                                    return;
-                                }
-                            }
-                            origIMP(self,
-                                    @selector(captureOutput:didOutputSampleBuffer:fromConnection:),
-                                    output, sampleBuffer, connection);
-                        }),
-                    (IMP *)&origIMP
-                );
-            }
-        }
-    }
+    if (delegate && queue) dicoyHookDelegate([delegate class]);
     %orig;
 }
 
