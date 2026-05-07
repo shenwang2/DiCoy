@@ -6,6 +6,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <os/lock.h>
 #import <objc/runtime.h>
@@ -45,7 +46,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock _audioReaderLock;
     os_unfair_lock _previewFrameLock;
     AVAssetReader            *_videoReader;
-    AVAssetReaderTrackOutput *_videoOutput;
+    AVAssetReaderOutput      *_videoOutput;
     OSType                    _videoFormat;
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
@@ -121,6 +122,13 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     self.currentMode = kDicoyModeOff;
     [self.client stopCapture];
     [self.client disconnect];
+    os_unfair_lock_lock(&_surfaceLock);
+    IOSurfaceRef oldSurface = self.latestSurface;
+    self.latestSurface  = NULL;
+    self.surfaceWidth   = 0;
+    self.surfaceHeight  = 0;
+    os_unfair_lock_unlock(&_surfaceLock);
+    if (oldSurface) CFRelease(oldSurface);
     os_unfair_lock_lock(&_videoReaderLock);
     [_videoReader cancelReading];
     _videoReader  = nil;
@@ -144,22 +152,71 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     _audioStagingChannels = 0;
 }
 
-// One reader, one output, one pixel format. AVAssetReader forbids multiple
-// outputs for the same track. Format is detected from the first real incoming
-// frame and the reader is recreated if it changes (e.g. between sessions).
+// One reader, one composition output. AVAssetReaderVideoCompositionOutput applies
+// the track's preferredTransform (corrects iPhone rotation metadata) and additionally
+// rotates 90° CCW if the display result is still landscape — fixing non-iPhone files
+// that lack rotation metadata.
 - (void)_setupVideoReaderForPath:(NSString *)path pixelFormat:(OSType)fmt {
     if (!path.length) return;
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+    NSURL *url = [NSURL fileURLWithPath:path];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
     AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) return;
+
+    // Apply preferredTransform to find the true display dimensions.
+    CGAffineTransform tx = track.preferredTransform;
+    CGSize naturalSize   = track.naturalSize;
+    CGRect displayRect   = CGRectApplyAffineTransform(
+        CGRectMake(0, 0, naturalSize.width, naturalSize.height), tx);
+    CGSize displaySize   = CGSizeMake(fabs(displayRect.size.width),
+                                      fabs(displayRect.size.height));
+
+    // Start with preferredTransform to fix rotation metadata (e.g. older iPhone portrait).
+    CGAffineTransform compositionTx = tx;
+    CGSize renderSize = displaySize;
+
+    // If the corrected display is still landscape, rotate 90° CCW to portrait.
+    // This handles: landscape-only files, non-iPhone vertical videos with identity transform.
+    if (displaySize.width > displaySize.height) {
+        // CCW 90°: (x,y) → (y, W−x) where W = displaySize.width
+        CGAffineTransform ccw90 = CGAffineTransformMake(0, -1, 1, 0, 0, displaySize.width);
+        compositionTx = CGAffineTransformConcat(tx, ccw90);
+        renderSize = CGSizeMake(displaySize.height, displaySize.width);
+    }
+
+    AVMutableVideoCompositionInstruction *instr =
+        [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instr.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+
+    AVMutableVideoCompositionLayerInstruction *layerInstr =
+        [AVMutableVideoCompositionLayerInstruction
+            videoCompositionLayerInstructionWithAssetTrack:track];
+    [layerInstr setTransform:compositionTx atTime:kCMTimeZero];
+    instr.layerInstructions = @[layerInstr];
+
+    CMTime frameDur = track.minFrameDuration;
+    if (!CMTIME_IS_VALID(frameDur) || frameDur.value == 0)
+        frameDur = CMTimeMake(1, 30);
+
+    AVMutableVideoComposition *videoComp = [AVMutableVideoComposition videoComposition];
+    videoComp.instructions  = @[instr];
+    videoComp.renderSize    = renderSize;
+    videoComp.frameDuration = frameDur;
+
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
     if (!reader) return;
-    AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput
-        assetReaderTrackOutputWithTrack:track
-        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(fmt)}];
+
+    NSDictionary *settings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(fmt)};
+    AVAssetReaderVideoCompositionOutput *out =
+        [AVAssetReaderVideoCompositionOutput
+            assetReaderVideoCompositionOutputWithVideoTracks:@[track]
+            videoSettings:settings];
+    out.videoComposition       = videoComp;
     out.alwaysCopiesSampleData = NO;
+
     [reader addOutput:out];
     if (![reader startReading]) return;
+
     os_unfair_lock_lock(&_videoReaderLock);
     [_videoReader cancelReading];
     _videoReader = reader;
@@ -219,7 +276,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
         return [self _nextVideoFrameForOrigin:origin];
     }
 
-    // Screen mirror — wrap the latest IOSurface from the daemon.
+    // Screen mirror — zero-copy wrap of the daemon's latest IOSurface.
     os_unfair_lock_lock(&_surfaceLock);
     IOSurfaceRef surface = self.latestSurface;
     uint16_t w = self.surfaceWidth, h = self.surfaceHeight;
@@ -227,28 +284,84 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock_unlock(&_surfaceLock);
     if (!surface) return NULL;
 
+    // Infer target pixel format and dimensions from the real camera frame.
+    // The daemon surface is always BGRA; many camera pipelines expect 420v/420f.
+    OSType targetFmt = kCVPixelFormatType_32BGRA;
+    uint32_t targetW = w, targetH = h;
+    if (origin) {
+        CVImageBufferRef originPix = CMSampleBufferGetImageBuffer(origin);
+        if (originPix) {
+            targetW = (uint32_t)CVPixelBufferGetWidth(originPix);
+            targetH = (uint32_t)CVPixelBufferGetHeight(originPix);
+        }
+        CMFormatDescriptionRef fd = CMSampleBufferGetFormatDescription(origin);
+        if (fd) targetFmt = CMFormatDescriptionGetMediaSubType(fd);
+    }
+
+    // Wrap IOSurface as a BGRA CVPixelBuffer (zero-copy; explicit format type required).
     NSDictionary *pbAttrs = @{
         (id)kCVPixelBufferWidthKey:               @(w),
         (id)kCVPixelBufferHeightKey:              @(h),
+        (id)kCVPixelBufferPixelFormatTypeKey:     @(kCVPixelFormatType_32BGRA),
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
     };
-    CVPixelBufferRef pix = NULL;
+    CVPixelBufferRef surfacePix = NULL;
     CVReturn cvr = CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, surface,
-                                                     (__bridge CFDictionaryRef)pbAttrs, &pix);
+                                                     (__bridge CFDictionaryRef)pbAttrs, &surfacePix);
     CFRelease(surface);
-    if (cvr != kCVReturnSuccess || !pix) return NULL;
+    if (cvr != kCVReturnSuccess || !surfacePix) return NULL;
+
+    // Scale and/or convert pixel format to match what the camera app expects.
+    // CIContext uses GPU when available; it is created once and reused.
+    static CIContext        *sCICtx;
+    static dispatch_once_t   sCICtxOnce;
+    dispatch_once(&sCICtxOnce, ^{ sCICtx = [CIContext contextWithOptions:nil]; });
+
+    CVPixelBufferRef pix = surfacePix;
+    BOOL needsConvert = (targetW != w || targetH != h ||
+                         targetFmt != kCVPixelFormatType_32BGRA);
+    if (needsConvert) {
+        CIImage *ciImg = [CIImage imageWithCVPixelBuffer:surfacePix];
+        if (targetW != w || targetH != h) {
+            CGFloat sx = (CGFloat)targetW / w, sy = (CGFloat)targetH / h;
+            ciImg = [ciImg imageByApplyingTransform:CGAffineTransformMakeScale(sx, sy)];
+        }
+        CVPixelBufferRef converted = NULL;
+        NSDictionary *cvAttrs = @{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
+        if (CVPixelBufferCreate(kCFAllocatorDefault, targetW, targetH, targetFmt,
+                                (__bridge CFDictionaryRef)cvAttrs,
+                                &converted) == kCVReturnSuccess && converted) {
+            [sCICtx render:ciImg toCVPixelBuffer:converted];
+            CVPixelBufferRelease(surfacePix);
+            pix = converted;
+        }
+        // If conversion fails, fall through with original BGRA surface pix.
+    }
 
     CMVideoFormatDescriptionRef fmt = NULL;
     if (CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pix, &fmt) != noErr) {
         CVPixelBufferRelease(pix); return NULL;
     }
-    CMSampleTimingInfo timing = {
-        .duration              = CMTimeMake(1, DICOY_TARGET_FPS),
-        .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
-        .decodeTimeStamp       = kCMTimeInvalid,
-    };
+
+    // Match timing from the real camera frame so the app's pipeline accepts the buffer.
+    CMSampleTimingInfo timing;
+    if (origin) {
+        timing = (CMSampleTimingInfo){
+            .duration              = CMSampleBufferGetDuration(origin),
+            .presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(origin),
+            .decodeTimeStamp       = CMSampleBufferGetDecodeTimeStamp(origin),
+        };
+    } else {
+        timing = (CMSampleTimingInfo){
+            .duration              = CMTimeMake(1, DICOY_TARGET_FPS),
+            .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
+            .decodeTimeStamp       = kCMTimeInvalid,
+        };
+    }
+
     CMSampleBufferRef sb = NULL;
-    CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pix, true, NULL, NULL, fmt, &timing, &sb);
+    CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pix, true,
+                                       NULL, NULL, fmt, &timing, &sb);
     CFRelease(fmt);
     CVPixelBufferRelease(pix);
     return sb;

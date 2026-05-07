@@ -1,6 +1,6 @@
 Package: com.dicoy.dicoy
 Name: DiCoy
-Version: 1.0.3
+Version: 1.0.4
 Architecture: iphoneos-arm
 Description: System-wide screen mirroring and media injection for camera/microphone feeds.
 Maintainer: DiCoy Developer <dev@dicoy.local>
