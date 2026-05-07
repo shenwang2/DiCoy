@@ -27,8 +27,6 @@
             <string>off</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
-            <key>PostNotification</key>
-            <string>com.dicoy.modeChanged</string>
             <key>validValues</key>
             <array>
                 <string>off</string>
@@ -65,8 +63,6 @@
             <string>/var/mobile/Media/DCIM/inject.mp4</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
-            <key>PostNotification</key>
-            <string>com.dicoy.modeChanged</string>
             <key>keyboardType</key>
             <integer>0</integer>
         </dict>
