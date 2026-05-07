@@ -22,6 +22,13 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 // DiCoyTweakManager
 // =========================================================================
 
+typedef NS_ENUM(NSInteger, DicoyRotation) {
+    kDicoyRotateDefault = 0,  // no rotation
+    kDicoyRotateCCW     = 1,  // 90° counter-clockwise
+    kDicoyRotateCW      = 2,  // 90° clockwise
+    kDicoyRotate180     = 3,  // 180° (upside-down)
+};
+
 @interface DiCoyTweakManager : NSObject
 + (instancetype)sharedManager;
 - (void)startMirroring;
@@ -38,6 +45,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 @property (nonatomic, copy)    NSString *currentMediaPath;
 @property (nonatomic, strong)  NSURL         *recordingOutputURL;
 @property (nonatomic, assign)  CFAbsoluteTime  recordingStartTime;
+@property (nonatomic, assign)  DicoyRotation   videoRotation;
 @end
 
 @implementation DiCoyTweakManager {
@@ -46,7 +54,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock _audioReaderLock;
     os_unfair_lock _previewFrameLock;
     AVAssetReader            *_videoReader;
-    AVAssetReaderOutput      *_videoOutput;
+    AVAssetReaderTrackOutput *_videoOutput;
     OSType                    _videoFormat;
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
@@ -108,6 +116,15 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     if ([mode isEqualToString:@"mediaInject"]) {
         self.currentMode      = kDicoyModeMediaInject;
         self.currentMediaPath = prefs[@"mediaFilePath"] ?: @"";
+        NSString *rotStr = prefs[@"videoRotation"] ?: @"default";
+        if ([rotStr isEqualToString:@"ccw"])
+            self.videoRotation = kDicoyRotateCCW;
+        else if ([rotStr isEqualToString:@"cw"])
+            self.videoRotation = kDicoyRotateCW;
+        else if ([rotStr isEqualToString:@"upsideDown"])
+            self.videoRotation = kDicoyRotate180;
+        else
+            self.videoRotation = kDicoyRotateDefault;
         [self _setupVideoReaderForPath:self.currentMediaPath
                            pixelFormat:kCVPixelFormatType_32BGRA];
     } else {
@@ -152,71 +169,21 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     _audioStagingChannels = 0;
 }
 
-// One reader, one composition output. AVAssetReaderVideoCompositionOutput applies
-// the track's preferredTransform (corrects iPhone rotation metadata) and additionally
-// rotates 90° CCW if the display result is still landscape — fixing non-iPhone files
-// that lack rotation metadata.
+// One reader, one track output. Raw decoded pixels — no auto-rotation.
+// User-selected rotation is applied per-frame in _nextVideoFrameForOrigin:.
 - (void)_setupVideoReaderForPath:(NSString *)path pixelFormat:(OSType)fmt {
     if (!path.length) return;
-    NSURL *url = [NSURL fileURLWithPath:path];
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
     AVAssetTrack *track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
     if (!track) return;
-
-    // Apply preferredTransform to find the true display dimensions.
-    CGAffineTransform tx = track.preferredTransform;
-    CGSize naturalSize   = track.naturalSize;
-    CGRect displayRect   = CGRectApplyAffineTransform(
-        CGRectMake(0, 0, naturalSize.width, naturalSize.height), tx);
-    CGSize displaySize   = CGSizeMake(fabs(displayRect.size.width),
-                                      fabs(displayRect.size.height));
-
-    // Start with preferredTransform to fix rotation metadata (e.g. older iPhone portrait).
-    CGAffineTransform compositionTx = tx;
-    CGSize renderSize = displaySize;
-
-    // If the corrected display is still landscape, rotate 90° CCW to portrait.
-    // This handles: landscape-only files, non-iPhone vertical videos with identity transform.
-    if (displaySize.width > displaySize.height) {
-        // CCW 90°: (x,y) → (y, W−x) where W = displaySize.width
-        CGAffineTransform ccw90 = CGAffineTransformMake(0, -1, 1, 0, 0, displaySize.width);
-        compositionTx = CGAffineTransformConcat(tx, ccw90);
-        renderSize = CGSizeMake(displaySize.height, displaySize.width);
-    }
-
-    AVMutableVideoCompositionInstruction *instr =
-        [AVMutableVideoCompositionInstruction videoCompositionInstruction];
-    instr.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
-
-    AVMutableVideoCompositionLayerInstruction *layerInstr =
-        [AVMutableVideoCompositionLayerInstruction
-            videoCompositionLayerInstructionWithAssetTrack:track];
-    [layerInstr setTransform:compositionTx atTime:kCMTimeZero];
-    instr.layerInstructions = @[layerInstr];
-
-    CMTime frameDur = track.minFrameDuration;
-    if (!CMTIME_IS_VALID(frameDur) || frameDur.value == 0)
-        frameDur = CMTimeMake(1, 30);
-
-    AVMutableVideoComposition *videoComp = [AVMutableVideoComposition videoComposition];
-    videoComp.instructions  = @[instr];
-    videoComp.renderSize    = renderSize;
-    videoComp.frameDuration = frameDur;
-
     AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:nil];
     if (!reader) return;
-
-    NSDictionary *settings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(fmt)};
-    AVAssetReaderVideoCompositionOutput *out =
-        [AVAssetReaderVideoCompositionOutput
-            assetReaderVideoCompositionOutputWithVideoTracks:@[track]
-            videoSettings:settings];
-    out.videoComposition       = videoComp;
+    AVAssetReaderTrackOutput *out = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+        outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey: @(fmt)}];
     out.alwaysCopiesSampleData = NO;
-
     [reader addOutput:out];
     if (![reader startReading]) return;
-
     os_unfair_lock_lock(&_videoReaderLock);
     [_videoReader cancelReading];
     _videoReader = reader;
@@ -414,10 +381,54 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     }
 
     CVImageBufferRef pix = CMSampleBufferGetImageBuffer(fileBuf);
+
+    // Apply user-selected rotation via CIContext (GPU-accelerated).
+    // The CIContext is created once and reused; rotation is applied after decoding
+    // so it works with any pixel format the reader produces.
+    CVPixelBufferRef rotatedPix = NULL;
+    if (pix && self.videoRotation != kDicoyRotateDefault) {
+        static CIContext        *sRotCtx;
+        static dispatch_once_t   sRotCtxOnce;
+        dispatch_once(&sRotCtxOnce, ^{ sRotCtx = [CIContext contextWithOptions:nil]; });
+
+        size_t srcW   = CVPixelBufferGetWidth(pix);
+        size_t srcH   = CVPixelBufferGetHeight(pix);
+        OSType srcFmt = CVPixelBufferGetPixelFormatType(pix);
+
+        CGAffineTransform rotTx;
+        size_t dstW, dstH;
+        if (self.videoRotation == kDicoyRotateCCW) {
+            rotTx = CGAffineTransformMakeRotation(M_PI_2);   // 90° CCW
+            dstW = srcH; dstH = srcW;
+        } else if (self.videoRotation == kDicoyRotateCW) {
+            rotTx = CGAffineTransformMakeRotation(-M_PI_2);  // 90° CW
+            dstW = srcH; dstH = srcW;
+        } else {                                              // 180°
+            rotTx = CGAffineTransformMakeRotation(M_PI);
+            dstW = srcW; dstH = srcH;
+        }
+
+        CIImage *ciImg   = [CIImage imageWithCVPixelBuffer:pix];
+        CIImage *rotated = [ciImg imageByApplyingTransform:rotTx];
+        // Normalize: rotation may shift origin to negative coordinates.
+        CGRect ext = rotated.extent;
+        rotated = [rotated imageByApplyingTransform:
+            CGAffineTransformMakeTranslation(-ext.origin.x, -ext.origin.y)];
+
+        NSDictionary *rotAttrs = @{(id)kCVPixelBufferIOSurfacePropertiesKey: @{}};
+        if (CVPixelBufferCreate(kCFAllocatorDefault, dstW, dstH, srcFmt,
+                                (__bridge CFDictionaryRef)rotAttrs,
+                                &rotatedPix) == kCVReturnSuccess && rotatedPix) {
+            [sRotCtx render:rotated toCVPixelBuffer:rotatedPix];
+        }
+    }
+
+    CVImageBufferRef effectivePix = rotatedPix ?: pix;
     CMVideoFormatDescriptionRef fmt = NULL;
     CMSampleBufferRef result = NULL;
-    if (pix && CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pix, &fmt) == noErr) {
-        CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pix, true, NULL, NULL,
+    if (effectivePix &&
+        CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, effectivePix, &fmt) == noErr) {
+        CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, effectivePix, true, NULL, NULL,
                                            fmt, &timing, &result);
         CFRelease(fmt);
         if (result && origin) {
@@ -427,6 +438,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
             if (tiff) CMSetAttachment(result, CFSTR("{TIFF}"), tiff, kCMAttachmentMode_ShouldPropagate);
         }
     }
+    if (rotatedPix) CVPixelBufferRelease(rotatedPix);
     CFRelease(fileBuf);
     if (result) {
         os_unfair_lock_lock(&_previewFrameLock);
