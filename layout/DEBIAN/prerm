@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ -d /var/jb ] && [ -d /var/jb/Library ]; then
+    P="/var/jb"
+else
+    P=""
+fi
+
+rm -f "${P}/Library/libSandy/DiCoy.plist"
