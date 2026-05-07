@@ -27,6 +27,7 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 - (void)stopMirroring;
 - (CMSampleBufferRef)buildSampleBufferMatchingBuffer:(CMSampleBufferRef)origin CF_RETURNS_RETAINED;
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd CF_RETURNS_RETAINED;
+- (BOOL)fillAudioIntoBufferList:(AudioBufferList *)ioData numFrames:(UInt32)numFrames asbd:(const AudioStreamBasicDescription *)asbd;
 @property (nonatomic, strong)  DiCoyClient *client;
 @property (nonatomic, assign)  IOSurfaceRef latestSurface;
 @property (nonatomic, assign)  uint16_t surfaceWidth;
@@ -48,9 +49,13 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     OSType                    _videoFormat;
     AVAssetReader            *_audioReader;
     AVAssetReaderTrackOutput *_audioOutput;
-    CMSampleBufferRef         _lastInjectedFrame; // latest video frame; display link reads this
-    CMTime                    _audioNextPTS;       // running PTS for injected audio
+    CMSampleBufferRef         _lastInjectedFrame;    // latest video frame; display link reads this
+    CMTime                    _audioNextPTS;          // running PTS for injected audio
     BOOL                      _audioPTSValid;
+    NSMutableData            *_audioStagingBuffer;   // decoded int16 LPCM for AU render path
+    NSUInteger                _audioStagingOffset;
+    double                    _audioStagingSampleRate;
+    UInt32                    _audioStagingChannels;
 }
 
 + (instancetype)sharedManager {
@@ -133,6 +138,10 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     os_unfair_lock_unlock(&_previewFrameLock);
     if (oldFrame) CFRelease(oldFrame);
     _audioPTSValid = NO;
+    _audioStagingBuffer = nil;
+    _audioStagingOffset = 0;
+    _audioStagingSampleRate = 0;
+    _audioStagingChannels = 0;
 }
 
 // One reader, one output, one pixel format. AVAssetReader forbids multiple
@@ -361,6 +370,100 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
     return restamped;
 }
 
+// AudioUnit render path (WebRTC / Voice Processing I/O). Reads int16 LPCM from the
+// AVAssetReader staging buffer and converts to whatever format the AU expects.
+- (BOOL)fillAudioIntoBufferList:(AudioBufferList *)ioData
+                      numFrames:(UInt32)numFrames
+                           asbd:(const AudioStreamBasicDescription *)asbd {
+    if (!self.active || !ioData || numFrames == 0 || !self.currentMediaPath.length) return NO;
+
+    double targetSR  = (asbd && asbd->mSampleRate > 0)       ? asbd->mSampleRate       : 48000.0;
+    UInt32 targetCh  = (asbd && asbd->mChannelsPerFrame > 0) ? asbd->mChannelsPerFrame : 1;
+    BOOL   isFloat   = asbd ? !!(asbd->mFormatFlags & kAudioFormatFlagIsFloat)          : YES;
+    BOOL   isNonInter= asbd ? !!(asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) : YES;
+
+    NSUInteger frameStride = targetCh * sizeof(int16_t);
+    NSUInteger bytesNeeded = numFrames * frameStride;
+
+    // Recreate reader if format changed or not initialized.
+    BOOL formatChanged = (_audioStagingSampleRate != targetSR || _audioStagingChannels != targetCh);
+    os_unfair_lock_lock(&_audioReaderLock);
+    BOOL readerOk = _audioReader && (_audioReader.status == AVAssetReaderStatusReading);
+    os_unfair_lock_unlock(&_audioReaderLock);
+
+    if (formatChanged || !readerOk || !_audioStagingBuffer) {
+        AudioStreamBasicDescription rd = { .mSampleRate = targetSR, .mChannelsPerFrame = targetCh };
+        [self _setupAudioReaderForPath:self.currentMediaPath matchingASBD:&rd];
+        _audioStagingBuffer     = _audioStagingBuffer ?: [NSMutableData dataWithCapacity:65536];
+        _audioStagingBuffer.length = 0;
+        _audioStagingOffset     = 0;
+        _audioStagingSampleRate = targetSR;
+        _audioStagingChannels   = targetCh;
+    }
+
+    // Drain file into staging until we have enough int16 frames, looping on EOF.
+    while ((_audioStagingBuffer.length - _audioStagingOffset) < bytesNeeded) {
+        os_unfair_lock_lock(&_audioReaderLock);
+        CMSampleBufferRef fb = (_audioReader && _audioReader.status == AVAssetReaderStatusReading)
+            ? [_audioOutput copyNextSampleBuffer] : nil;
+        os_unfair_lock_unlock(&_audioReaderLock);
+
+        if (!fb) {
+            // EOF — compact and loop.
+            NSUInteger rem = _audioStagingBuffer.length - _audioStagingOffset;
+            if (rem) memmove(_audioStagingBuffer.mutableBytes,
+                             (uint8_t *)_audioStagingBuffer.bytes + _audioStagingOffset, rem);
+            _audioStagingBuffer.length = rem;
+            _audioStagingOffset = 0;
+            AudioStreamBasicDescription rd = { .mSampleRate = targetSR, .mChannelsPerFrame = targetCh };
+            [self _setupAudioReaderForPath:self.currentMediaPath matchingASBD:&rd];
+            os_unfair_lock_lock(&_audioReaderLock);
+            fb = (_audioReader && _audioReader.status == AVAssetReaderStatusReading)
+                ? [_audioOutput copyNextSampleBuffer] : nil;
+            os_unfair_lock_unlock(&_audioReaderLock);
+            if (!fb) return NO;
+        }
+
+        CMBlockBufferRef block = CMSampleBufferGetDataBuffer(fb);
+        if (block) {
+            size_t len = 0; char *ptr = NULL;
+            CMBlockBufferGetDataPointer(block, 0, NULL, &len, &ptr);
+            [_audioStagingBuffer appendBytes:ptr length:len];
+        }
+        CFRelease(fb);
+    }
+
+    // Compact periodically to avoid unbounded growth.
+    if (_audioStagingOffset > 32768) {
+        NSUInteger rem = _audioStagingBuffer.length - _audioStagingOffset;
+        memmove(_audioStagingBuffer.mutableBytes,
+                (uint8_t *)_audioStagingBuffer.bytes + _audioStagingOffset, rem);
+        _audioStagingBuffer.length = rem;
+        _audioStagingOffset = 0;
+    }
+
+    int16_t *src = (int16_t *)((uint8_t *)_audioStagingBuffer.bytes + _audioStagingOffset);
+    _audioStagingOffset += bytesNeeded;
+
+    // Convert int16 interleaved → target format and fill ioData.
+    if (isFloat && isNonInter) {
+        for (UInt32 ch = 0; ch < MIN(targetCh, ioData->mNumberBuffers); ch++) {
+            float *dst = (float *)ioData->mBuffers[ch].mData;
+            for (UInt32 f = 0; f < numFrames; f++)
+                dst[f] = src[f * targetCh + ch] * (1.0f / 32768.0f);
+        }
+    } else if (isFloat) {
+        float *dst = (float *)ioData->mBuffers[0].mData;
+        for (UInt32 i = 0; i < numFrames * targetCh; i++)
+            dst[i] = src[i] * (1.0f / 32768.0f);
+    } else {
+        // Int16 or other — direct copy.
+        memcpy(ioData->mBuffers[0].mData, src,
+               MIN(bytesNeeded, ioData->mBuffers[0].mDataByteSize));
+    }
+    return YES;
+}
+
 // Build a looping composition of the injected video that fills `duration` seconds,
 // delete Camera.app's raw output, export ours to the same URL, then call completion.
 // Used to replace AVCaptureMovieFileOutput recordings after they finish.
@@ -407,6 +510,84 @@ static const void *kDiCoyDisplayLinkKey  = &kDiCoyDisplayLinkKey;
 }
 
 @end
+
+
+// =========================================================================
+// AudioUnit render hook — covers WebRTC (Discord, FaceTime, etc.) and any app
+// that uses Voice Processing I/O or Remote I/O directly instead of
+// AVCaptureAudioDataOutput.  Bus 1 is the microphone input on all I/O units.
+// =========================================================================
+
+// Format cache: inferred from the filled AudioBufferList after origRender returns,
+// so we never call AudioUnitGetProperty from inside the render callback.
+static AudioUnit              gCachedAU      = NULL;
+static UInt32                 gCachedBus     = UINT32_MAX;
+static AudioStreamBasicDescription gCachedASBD = {};
+static os_unfair_lock         gCachedAULock  = OS_UNFAIR_LOCK_INIT;
+
+static AudioStreamBasicDescription dicoyInferAUFormat(AudioUnit unit, UInt32 bus,
+                                                       UInt32 numFrames,
+                                                       const AudioBufferList *ioData) {
+    os_unfair_lock_lock(&gCachedAULock);
+    if (gCachedAU == unit && gCachedBus == bus && gCachedASBD.mSampleRate > 0) {
+        AudioStreamBasicDescription a = gCachedASBD;
+        os_unfair_lock_unlock(&gCachedAULock);
+        return a;
+    }
+    os_unfair_lock_unlock(&gCachedAULock);
+
+    if (!ioData || ioData->mNumberBuffers == 0 || numFrames == 0)
+        return (AudioStreamBasicDescription){};
+
+    BOOL isNonInter      = (ioData->mNumberBuffers > 1);
+    UInt32 bytesPerFrame = ioData->mBuffers[0].mDataByteSize / numFrames;
+    BOOL isFloat         = (bytesPerFrame == sizeof(float));
+    UInt32 channels      = isNonInter ? ioData->mNumberBuffers : 1;
+
+    AudioStreamBasicDescription asbd = {
+        .mSampleRate       = 48000.0,   // Voice Processing I/O default on modern iOS
+        .mFormatID         = kAudioFormatLinearPCM,
+        .mFormatFlags      = kAudioFormatFlagIsPacked
+                           | (isFloat    ? kAudioFormatFlagIsFloat          : 0)
+                           | (isNonInter ? kAudioFormatFlagIsNonInterleaved : 0),
+        .mChannelsPerFrame = channels,
+        .mBitsPerChannel   = bytesPerFrame * 8,
+        .mFramesPerPacket  = 1,
+        .mBytesPerFrame    = bytesPerFrame,
+        .mBytesPerPacket   = bytesPerFrame,
+    };
+
+    os_unfair_lock_lock(&gCachedAULock);
+    gCachedAU   = unit;
+    gCachedBus  = bus;
+    gCachedASBD = asbd;
+    os_unfair_lock_unlock(&gCachedAULock);
+    return asbd;
+}
+
+static OSStatus (*origAudioUnitRender)(AudioUnit, AudioUnitRenderActionFlags *,
+                                        const AudioTimeStamp *, UInt32, UInt32,
+                                        AudioBufferList *) = NULL;
+
+static OSStatus dicoyAudioUnitRender(AudioUnit inUnit,
+                                      AudioUnitRenderActionFlags *ioActionFlags,
+                                      const AudioTimeStamp *inTimeStamp,
+                                      UInt32 inOutputBusNumber,
+                                      UInt32 inNumberFrames,
+                                      AudioBufferList *ioData) {
+    OSStatus result = origAudioUnitRender(inUnit, ioActionFlags, inTimeStamp,
+                                           inOutputBusNumber, inNumberFrames, ioData);
+    // Bus 1 = microphone input on all I/O audio units.
+    if (result != noErr || inOutputBusNumber != 1 || !ioData || inNumberFrames == 0)
+        return result;
+    DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
+    if (!mgr.active || mgr.currentMode != kDicoyModeMediaInject) return result;
+    AudioStreamBasicDescription asbd = dicoyInferAUFormat(inUnit, inOutputBusNumber,
+                                                           inNumberFrames, ioData);
+    if (asbd.mSampleRate == 0) return result;
+    [mgr fillAudioIntoBufferList:ioData numFrames:inNumberFrames asbd:&asbd];
+    return result;
+}
 
 
 // =========================================================================
@@ -831,6 +1012,9 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
     libSandy_applyProfile("DiCoy");
 
     %init;
+    // Hook AudioUnitRender to intercept Voice Processing I/O mic input (WebRTC apps).
+    MSHookFunction((void *)AudioUnitRender, (void *)dicoyAudioUnitRender,
+                   (void **)&origAudioUnitRender);
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
         NULL,
