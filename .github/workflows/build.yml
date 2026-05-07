@@ -65,6 +65,9 @@ jobs:
           fi
           cp libSandy.h $THEOS/include/
 
+      - name: Set DEBIAN script permissions
+        run: chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
+
       - name: Build (${{ matrix.label }})
         run: |
           make clean 2>/dev/null || true
