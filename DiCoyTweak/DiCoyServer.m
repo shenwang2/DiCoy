@@ -25,6 +25,7 @@
 #import <stdarg.h>
 #import <os/log.h>
 #import <dlfcn.h>
+#import <sys/stat.h>
 #import "DiCoyProtocol.h"
 
 // =========================================================================
