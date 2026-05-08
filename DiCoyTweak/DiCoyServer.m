@@ -10,6 +10,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <stdarg.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <sys/socket.h>
 #import <sys/un.h>
@@ -69,12 +70,27 @@ static int    srvActiveCount(void);
 // Public entry point
 // =========================================================================
 
+// Write a one-liner to /var/tmp/dicoy_server.txt — readable via cat on device.
+static void srvLog(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    // Append so we keep history across frames.
+    FILE *f = fopen("/var/tmp/dicoy_server.txt", "a");
+    if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+    os_log(sSrvLog, "%{public}s", buf);
+}
+
 void diCoyServerStart(void) {
     sSrvLog = os_log_create("com.dicoy.server", "springboard");
     for (int i = 0; i < SRV_MAX_CLIENTS; i++) sClients[i].fd = -1;
     mkdir(DICOY_JB_PREFIX "/var/run", 0755);
 
-    os_log(sSrvLog, "DiCoyServer starting in SpringBoard");
+    // Truncate from previous run so the file shows only current session.
+    FILE *f = fopen("/var/tmp/dicoy_server.txt", "w");
+    if (f) { fprintf(f, "DiCoyServer start PID=%d\n", getpid()); fclose(f); }
 
     pthread_t t;
     pthread_create(&t, NULL, srvSocketServer, NULL);
@@ -118,7 +134,6 @@ static BOOL srvSetupSurfaces(int w, int h) {
 // =========================================================================
 
 static void * srvCaptureLoop(void *arg) {
-    // Load CARenderServer at runtime — same dlopen approach as the old daemon.
     void *lib = dlopen(
         "/System/Library/PrivateFrameworks/CARenderServer.framework/CARenderServer",
         RTLD_LAZY | RTLD_GLOBAL);
@@ -126,13 +141,11 @@ static void * srvCaptureLoop(void *arg) {
         ? (CARSRenderDisplay_t)dlsym(lib, "CARenderServerRenderDisplay")
         : NULL;
     if (!renderFn) {
-        os_log_fault(sSrvLog, "CARenderServerRenderDisplay not found: %s", dlerror());
+        srvLog("FAIL: CARenderServerRenderDisplay not found: %s", dlerror());
         return NULL;
     }
+    srvLog("CARenderServerRenderDisplay resolved");
 
-    // CARenderServer is in the UI session bootstrap; SpringBoard's bootstrap_port
-    // is already in the right session, so this lookup succeeds where a daemon's
-    // Background-session bootstrap_port would not.
     mach_port_t renderPort = MACH_PORT_NULL;
     for (int i = 0; i < 30; i++) {
         kern_return_t kr = bootstrap_look_up(
@@ -141,23 +154,25 @@ static void * srvCaptureLoop(void *arg) {
         sleep(1);
     }
     if (renderPort == MACH_PORT_NULL) {
-        os_log_fault(sSrvLog, "bootstrap_look_up(CARenderServer) failed");
+        srvLog("FAIL: bootstrap_look_up(CARenderServer) timed out");
         return NULL;
     }
-    os_log(sSrvLog, "CARenderServer port=%u", renderPort);
+    srvLog("CARenderServer port=%u", renderPort);
 
     CGRect nb = [UIScreen mainScreen].nativeBounds;
     int w = (nb.size.width  > 0) ? (int)nb.size.width  : 1170;
     int h = (nb.size.height > 0) ? (int)nb.size.height : 2532;
-    os_log(sSrvLog, "Display %d x %d", w, h);
+    srvLog("Display %d x %d", w, h);
 
     if (!srvSetupSurfaces(w, h)) {
-        os_log_fault(sSrvLog, "Surface pool setup failed");
+        srvLog("FAIL: IOSurfaceCreate failed (kIOSurfaceIsGlobal blocked in SpringBoard?)");
         return NULL;
     }
+    srvLog("Surface pool ready: id[0]=%u id[1]=%u", sSurfIDs[0], sSurfIDs[1]);
 
     const uint64_t frameIntervalNs = (uint64_t)(1e9 / DICOY_TARGET_FPS);
     uint64_t lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    static BOOL sFirstFrame = YES;
 
     while (1) {
         if (srvActiveCount() == 0) { usleep(100000); continue; }
@@ -178,9 +193,14 @@ static void * srvCaptureLoop(void *arg) {
         IOSurfaceUnlock(dst, 0, NULL);
 
         if (kr == KERN_SUCCESS) {
+            if (sFirstFrame) {
+                sFirstFrame = NO;
+                srvLog("First frame rendered OK: surfID=%u %dx%d",
+                       sSurfIDs[slot], w, h);
+            }
             srvBroadcast(sSurfIDs[slot], (uint16_t)w, (uint16_t)h);
-        } else {
-            os_log_error(sSrvLog, "CARenderServerRenderDisplay: %d", kr);
+        } else if (sFirstFrame) {
+            srvLog("FAIL: CARenderServerRenderDisplay kr=0x%x", (unsigned)kr);
         }
     }
 
@@ -206,7 +226,7 @@ static void * srvSocketServer(void *arg) {
     }
     chmod(DICOY_SOCKET_PATH, 0777);
     listen(srvFd, SRV_MAX_CLIENTS);
-    os_log(sSrvLog, "Listening on %s", DICOY_SOCKET_PATH);
+    srvLog("Socket listening on %s", DICOY_SOCKET_PATH);
 
     while (1) {
         int cfd = accept(srvFd, NULL, NULL);
