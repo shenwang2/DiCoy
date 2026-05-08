@@ -8,6 +8,10 @@
 // client via IOSurfaceLookupFromMachPort. No IOSurfaceRootUserClient access
 // needed on the receiving side.
 //
+// kIOSurfaceIsGlobal is required so the render server process (separate from
+// SpringBoard) can call IOSurfaceLookup(id) to map the surface for writing.
+// XPC delivery to clients uses Mach port rights and does not need it.
+//
 // MachXPCListener registers "com.dicoy.server" via bootstrap_check_in.
 // Sandboxed clients are granted bootstrap_look_up access by the Sandy profile's
 // mach-lookup extension (com.apple.security.exception.mach-lookup.global-name).
@@ -30,8 +34,9 @@
 // =========================================================================
 
 // Second argument is a CFStringRef display name.
-// Passing NULL returns KERN_SUCCESS but renders blank.
-// Call CARenderServerCopyDisplayList() to discover valid names at runtime.
+// On this device "LCD" is the correct name; the render server returns
+// KERN_FAILURE when the IOSurface is not globally accessible and KERN_SUCCESS
+// when it can map the surface via IOSurfaceLookup(id).
 typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t  port,
                                              CFStringRef  displayName,
                                              IOSurfaceRef surface,
@@ -127,8 +132,6 @@ static int srvActiveCount(void) {
     return YES;
 }
 
-// DiCoyXPCServer — called from the client over XPC
-
 - (oneway void)startCapture {
     NSXPCConnection *conn = [NSXPCConnection currentConnection];
     pthread_mutex_lock(&sClientsMtx);
@@ -184,7 +187,7 @@ static int srvActiveCount(void) {
     static BOOL sFirstFrame = YES;
     if (sFirstFrame) {
         sFirstFrame = NO;
-        // Sample a grid of pixels to avoid false negative from black screen corners.
+        // Grid-sample the surface to avoid false negatives from black corners.
         IOSurfaceLock(gSurface, kIOSurfaceLockReadOnly, NULL);
         uint8_t *px  = (uint8_t *)IOSurfaceGetBaseAddress(gSurface);
         size_t   bpr = IOSurfaceGetBytesPerRow(gSurface);
@@ -239,9 +242,6 @@ void diCoyServerStart(void) {
     sConnections = [NSMutableSet set];
     sActive      = [NSMutableSet set];
 
-    // Register the Mach service name via bootstrap_check_in.
-    // Dopamine 2's patched launchd allows arbitrary check-in from SpringBoard.
-    // Sandy mach-lookup extension grants sandboxed clients bootstrap_look_up access.
     sListenerDelegate = [DiCoyXPCListenerDelegate new];
     sXPCListener = [[MachXPCListener alloc] initWithObject:sListenerDelegate
                                                 identifier:@DICOY_XPC_SERVICE_NAME];
@@ -252,20 +252,19 @@ void diCoyServerStart(void) {
         srvLog("MachXPCListener bootstrap_check_in FAILED — screen mirror unavailable");
     }
 
-    // Display capture setup must run on the main thread.
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        // 1. Locate CARenderServerRenderDisplay (merged into QuartzCore on iOS 15+).
+        // 1. Locate CARenderServerRenderDisplay.
         CARSRenderDisplay_t renderFn =
             (CARSRenderDisplay_t)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
         srvLog("CARenderServerRenderDisplay = %s", renderFn ? "FOUND" : "NOT FOUND");
+        if (!renderFn) { srvLog("ABORT: CARenderServerRenderDisplay absent"); return; }
 
-        if (!renderFn) {
-            srvLog("ABORT: CARenderServerRenderDisplay absent");
-            return;
-        }
-
-        // 2. Create the destination IOSurface (local; delivered to clients via XPC).
+        // 2. Create the destination IOSurface.
+        //    kIOSurfaceIsGlobal allows the render server process to call
+        //    IOSurfaceLookup(id) and map the surface for writing.
+        //    Deprecated since iOS 11 but still functional; XPC delivery does
+        //    not need it (uses Mach port rights) but CARenderServerRenderDisplay does.
         CGRect native = [UIScreen mainScreen].nativeBounds;
         uint16_t w = (uint16_t)native.size.width;
         uint16_t h = (uint16_t)native.size.height;
@@ -279,23 +278,29 @@ void diCoyServerStart(void) {
         CFDictionarySetValue(props, kIOSurfaceHeight,          (__bridge CFNumberRef)@(h));
         CFDictionarySetValue(props, kIOSurfacePixelFormat,     (__bridge CFNumberRef)@(0x42475241)); // 'BGRA'
         CFDictionarySetValue(props, kIOSurfaceBytesPerElement, (__bridge CFNumberRef)@(4));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        CFDictionarySetValue(props, kIOSurfaceIsGlobal, kCFBooleanTrue);
+#pragma clang diagnostic pop
 
         gSurface = IOSurfaceCreate(props);
         CFRelease(props);
 
-        if (!gSurface) {
-            srvLog("ABORT: IOSurfaceCreate failed");
-            return;
-        }
+        if (!gSurface) { srvLog("ABORT: IOSurfaceCreate failed"); return; }
 
         gSurfaceW = w;
         gSurfaceH = h;
-        srvLog("IOSurface created: %p %ux%u bpr=%zu",
-               (void *)gSurface, w, h, IOSurfaceGetBytesPerRow(gSurface));
+        srvLog("IOSurface created: %p id=%u %ux%u bpr=%zu",
+               (void *)gSurface, IOSurfaceGetID(gSurface), w, h,
+               IOSurfaceGetBytesPerRow(gSurface));
 
         // 3. Discover the display name for CARenderServerRenderDisplay.
-        //    CARenderServerCopyDisplayList returns a CFArray of valid CFString names.
-        //    If absent, probe known candidate strings and log all results.
+        //    CARenderServerCopyDisplayList is the authoritative source; if absent,
+        //    probe candidates and pick the first that returns KERN_SUCCESS.
+        //    "LCD" is the real display name on this device — other names are no-ops
+        //    that return KERN_SUCCESS without rendering anything. "LCD" returned
+        //    KERN_FAILURE before kIOSurfaceIsGlobal was added; with it, it should
+        //    now succeed.
         NSString *displayName = nil;
         {
             CARSCopyDisplayList_t copyFn =
@@ -317,38 +322,28 @@ void diCoyServerStart(void) {
                     }
                     CFRelease(list);
                 } else {
-                    srvLog("CARenderServerCopyDisplayList: returned nil");
+                    srvLog("CARenderServerCopyDisplayList: nil");
                 }
             } else {
-                srvLog("CARenderServerCopyDisplayList: symbol not found — probing candidates");
+                srvLog("CARenderServerCopyDisplayList: not found, probing");
             }
 
-            // If display list didn't give us a name, probe known candidates.
-            // Log every result so we know exactly which names the OS accepts.
             if (!displayName) {
-                NSArray<NSString*> *candidates = @[
-                    @"LCD", @"lcd", @"CLCD", @"clcd",
-                    @"IDP0", @"ColorLCD", @"", @"built-in"
-                ];
+                // "LCD" first — it is the only name that was recognized (KERN_FAILURE
+                // without kIOSurfaceIsGlobal; expected KERN_SUCCESS now that it is set).
+                NSArray<NSString*> *candidates = @[@"LCD", @"CLCD", @"lcd"];
                 for (NSString *name in candidates) {
-                    CFStringRef cfName = (__bridge CFStringRef)name;
-                    kern_return_t kr = renderFn(0, cfName, gSurface, 0);
-                    srvLog("Probe '%s': 0x%x %s",
+                    kern_return_t kr = renderFn(0, (__bridge CFStringRef)name, gSurface, 0);
+                    srvLog("Probe '%s': 0x%x (%s)",
                            name.UTF8String, (unsigned)kr,
-                           kr == KERN_SUCCESS ? "(KERN_SUCCESS)" : "(KERN_FAILURE)");
+                           kr == KERN_SUCCESS ? "KERN_SUCCESS" : "KERN_FAILURE");
                     if (kr == KERN_SUCCESS && !displayName) {
                         displayName = name;
                     }
                 }
-                // Always probe NULL to see its return code too.
-                kern_return_t krNull = renderFn(0, NULL, gSurface, 0);
-                srvLog("Probe NULL: 0x%x %s",
-                       (unsigned)krNull,
-                       krNull == KERN_SUCCESS ? "(KERN_SUCCESS)" : "(KERN_FAILURE)");
             }
-
             srvLog("Selected displayName: %s",
-                   displayName.UTF8String ?: "NULL (may render blank)");
+                   displayName.UTF8String ?: "NULL (fallback — expect black)");
         }
 
         // 4. Drive frame capture via CADisplayLink.
