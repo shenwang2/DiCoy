@@ -1,21 +1,27 @@
 #!/bin/sh
 set -e
 
-# Detect jailbreak root prefix at install time so this works on both
-# rootless (Dopamine, palera1n rootless) and rootful (checkra1n etc.).
+# Detect jailbreak root prefix.
 if [ -d /var/jb ] && [ -d /var/jb/Library ]; then
     P="/var/jb"
 else
     P=""
 fi
 
+# Log file so we can see what happened even if everything is redirected.
+LOG="${P}/var/log/dicoy-install.log"
+mkdir -p "${P}/var/log"
+mkdir -p "${P}/var/run"
+exec >> "$LOG" 2>&1
+echo "=== DiCoy postinst $(date) ==="
+echo "JB prefix: $P"
+
+# --------------------------------------------------------------------------
+# Sandy sandbox-extension profile
+# --------------------------------------------------------------------------
 SANDY_DIR="${P}/Library/libSandy"
 mkdir -p "$SANDY_DIR"
 
-# Write the Sandy sandbox-extension profile.
-# sandyd (from com.opa334.libsandy) reads profiles from JBROOT/Library/libSandy/<name>.plist
-# and rejects any file where st_uid != 0 || st_gid != 0.  On iOS, GID 0 = wheel;
-# this script runs as root (uid=0, gid=0) so the created file satisfies both checks.
 cat > "${SANDY_DIR}/DiCoy.plist" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -58,18 +64,50 @@ PLISTEOF
 
 chown root:wheel "${SANDY_DIR}/DiCoy.plist"
 chmod 644 "${SANDY_DIR}/DiCoy.plist"
+echo "Sandy profile written: ${SANDY_DIR}/DiCoy.plist"
 
-# Register and start the daemon with launchd.
-# Use the jailbreak-prefixed launchctl for rootless; fall back to system launchctl.
-LAUNCHCTL="${P}/usr/bin/launchctl"
-if [ ! -x "$LAUNCHCTL" ]; then
-    LAUNCHCTL="launchctl"
+# --------------------------------------------------------------------------
+# Daemon registration
+# --------------------------------------------------------------------------
+DAEMON_BIN="${P}/usr/sbin/DiCoyDaemon"
+LAUNCHD_PLIST="${P}/Library/LaunchDaemons/com.dicoy.daemon.plist"
+
+echo "Daemon binary: $DAEMON_BIN"
+echo "LaunchDaemon plist: $LAUNCHD_PLIST"
+
+if [ ! -f "$DAEMON_BIN" ]; then
+    echo "ERROR: daemon binary not found at $DAEMON_BIN — skipping registration"
+else
+    echo "Daemon binary exists ($(ls -la "$DAEMON_BIN"))"
+    chmod 755 "$DAEMON_BIN"
 fi
-LAUNCHD="${P}/Library/LaunchDaemons/com.dicoy.daemon.plist"
-if [ -f "$LAUNCHD" ]; then
-    # bootout removes any previous instance; bootstrap registers and starts the new one.
-    # Errors are suppressed so a fresh install (nothing to bootout) doesn't fail.
-    "$LAUNCHCTL" bootout system "$LAUNCHD" 2>/dev/null || true
-    "$LAUNCHCTL" bootstrap system "$LAUNCHD" 2>/dev/null || \
-    "$LAUNCHCTL" load "$LAUNCHD" 2>/dev/null || true
+
+if [ ! -f "$LAUNCHD_PLIST" ]; then
+    echo "ERROR: LaunchDaemon plist not found at $LAUNCHD_PLIST — skipping registration"
+else
+    echo "LaunchDaemon plist exists"
+
+    # Prefer the JB-patched launchctl; fall back to system launchctl.
+    LAUNCHCTL="${P}/usr/bin/launchctl"
+    if [ ! -x "$LAUNCHCTL" ]; then
+        LAUNCHCTL="launchctl"
+    fi
+    echo "Using launchctl: $LAUNCHCTL"
+
+    # Remove any previous instance (ignore errors — nothing to remove on fresh install).
+    "$LAUNCHCTL" bootout system "$LAUNCHD_PLIST" 2>&1 || true
+
+    # Register and start the daemon.
+    if "$LAUNCHCTL" bootstrap system "$LAUNCHD_PLIST" 2>&1; then
+        echo "launchctl bootstrap: SUCCESS"
+    else
+        echo "launchctl bootstrap failed — trying launchctl load"
+        if "$LAUNCHCTL" load "$LAUNCHD_PLIST" 2>&1; then
+            echo "launchctl load: SUCCESS"
+        else
+            echo "launchctl load also failed — daemon will start on next reboot"
+        fi
+    fi
 fi
+
+echo "=== DiCoy postinst done ==="
