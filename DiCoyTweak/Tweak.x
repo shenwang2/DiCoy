@@ -106,8 +106,9 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     NSDictionary *prefs =
         [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
-    [mode writeToFile:@"/var/tmp/dicoy_mode.txt"
-           atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [[NSString stringWithFormat:@"%@:%@", NSProcessInfo.processInfo.processName, mode]
+     writeToFile:@"/var/tmp/dicoy_mode.txt" atomically:YES
+        encoding:NSUTF8StringEncoding error:nil];
     if ([mode isEqualToString:@"off"]) return;
     self.active = YES;
     if ([mode isEqualToString:@"mediaInject"]) {
