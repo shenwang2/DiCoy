@@ -33,11 +33,11 @@ cat > "${SANDY_DIR}/DiCoy.plist" <<'PLISTEOF'
 	<array>
 		<dict>
 			<key>type</key>
-			<string>file</string>
+			<string>mach</string>
 			<key>extension_class</key>
-			<string>com.apple.app-sandbox.read-write</string>
-			<key>path</key>
-			<string>/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
+			<string>com.apple.security.exception.mach-lookup.global-name</string>
+			<key>mach_name</key>
+			<string>com.dicoy.server</string>
 		</dict>
 		<dict>
 			<key>type</key>
@@ -45,7 +45,7 @@ cat > "${SANDY_DIR}/DiCoy.plist" <<'PLISTEOF'
 			<key>extension_class</key>
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
-			<string>/var/tmp/dicoy.sock</string>
+			<string>/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
 		</dict>
 		<dict>
 			<key>type</key>
@@ -70,14 +70,6 @@ cat > "${SANDY_DIR}/DiCoy.plist" <<'PLISTEOF'
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
 			<string>/var/tmp/dicoy_debug.txt</string>
-		</dict>
-		<dict>
-			<key>type</key>
-			<string>iokit_user_client</string>
-			<key>extension_class</key>
-			<string>com.apple.security.exception.iokit-user-client-class</string>
-			<key>registry_entry_class</key>
-			<string>IOSurfaceRootUserClient</string>
 		</dict>
 	</array>
 </dict>
