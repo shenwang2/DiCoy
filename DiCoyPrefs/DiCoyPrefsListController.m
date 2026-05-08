@@ -82,7 +82,9 @@ static NSString *jbEnvironmentString(void) {
         }
     }
     // Reload only the table footer without rebuilding specifiers.
-    [self.tableView reloadData];
+    // PSListController exposes the table as `self.table`, not `self.tableView`
+    // (it is not a UITableViewController subclass).
+    [self.table reloadData];
 }
 
 // Called by PSListController whenever a specifier value changes.
