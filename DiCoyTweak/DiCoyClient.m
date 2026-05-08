@@ -116,7 +116,7 @@ static NSXPCInterface *DiCoyClientInterface(void) {
 }
 
 // DiCoyXPCClient — called on the XPC queue each time the server sends a frame.
-- (void)receiveFrame:(id)surface width:(uint32_t)w height:(uint32_t)h {
+- (oneway void)receiveFrame:(id)surface width:(uint32_t)w height:(uint32_t)h {
     IOSurfaceRef surf = (__bridge IOSurfaceRef)surface;
     if (!surf) return;
 
