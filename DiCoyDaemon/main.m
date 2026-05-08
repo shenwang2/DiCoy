@@ -19,6 +19,7 @@
 #import <signal.h>
 #import <unistd.h>
 #import <os/log.h>
+#import <dlfcn.h>
 
 // bootstrap_look_up is not declared in the iOS SDK's mach/bootstrap.h
 extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
@@ -26,26 +27,13 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
 #import "DiCoyProtocol.h"
 
 // =========================================================================
-// Private API declarations
-//
-// CARenderServer is the private system compositor daemon. It holds the
-// canonical, fully-composited pixel output for every display. By sending
-// it a render request we get a pixel-perfect screenshot that includes all
-// SpringBoard layers, system UI, and the frontmost app – exactly what the
-// user sees – without going through AVFoundation or ReplayKit.
-//
-// These symbols are resolved at link time via the private CARenderServer
-// framework (/System/Library/PrivateFrameworks/...). The declarations
-// below allow the compiler to type-check call sites.
+// CARenderServer — loaded at runtime via dlopen to avoid a hard link-time
+// dependency on the private framework TBD stub (which may not be present
+// in the theos SDK shipped with CI). The function pointer is resolved once
+// in captureLoop() before the capture loop starts.
 // =========================================================================
 
-// Renders the current composited display into `surface`.
-//   server  – Mach port obtained via bootstrap_look_up("com.apple.CARenderServer")
-//   display – 0 for the main iPhone display
-//   surface – destination IOSurface (must be pre-allocated with matching dimensions)
-//   x, y    – pixel offset; pass 0.0, 0.0 to render from the top-left corner
-//   flags   – 0 for synchronous, fully-composited render
-extern kern_return_t CARenderServerRenderDisplay(
+typedef kern_return_t (*CARenderServerRenderDisplay_t)(
     mach_port_t  server,
     uint32_t     display,
     IOSurfaceRef surface,
@@ -53,6 +41,7 @@ extern kern_return_t CARenderServerRenderDisplay(
     CGFloat      y,
     uint32_t     flags
 );
+static CARenderServerRenderDisplay_t gRenderDisplay = NULL;
 
 // =========================================================================
 // Constants / configuration
@@ -117,6 +106,12 @@ static void onSignal(int sig) {
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        // Create log and socket directories before redirecting output.
+        // launchd writes stdout/stderr to StandardOutPath/StandardErrorPath;
+        // if the directory doesn't exist it silently drops the output.
+        mkdir(DICOY_JB_PREFIX "/var/log", 0755);
+        mkdir(DICOY_JB_PREFIX "/var/run", 0755);
+
         gLog = os_log_create("com.dicoy.daemon", "main");
         os_log(gLog, "DiCoyDaemon starting (PID %d)", getpid());
 
@@ -217,6 +212,24 @@ static BOOL setupSurfaces(void) {
 // =========================================================================
 
 static void * captureLoop(void *arg) {
+    // Resolve CARenderServerRenderDisplay from the private framework via dlopen.
+    // This avoids a hard link-time dependency on the CARenderServer TBD stub:
+    // the linker never sees the symbol, so the binary always loads cleanly.
+    if (!gRenderDisplay) {
+        void *lib = dlopen(
+            "/System/Library/PrivateFrameworks/CARenderServer.framework/CARenderServer",
+            RTLD_LAZY | RTLD_GLOBAL);
+        if (lib) {
+            gRenderDisplay = (CARenderServerRenderDisplay_t)
+                dlsym(lib, "CARenderServerRenderDisplay");
+        }
+        if (!gRenderDisplay) {
+            os_log_fault(gLog, "dlopen/dlsym CARenderServerRenderDisplay failed: %s", dlerror());
+            return NULL;
+        }
+        os_log(gLog, "CARenderServerRenderDisplay loaded via dlopen");
+    }
+
     // Look up CARenderServer. Retry up to 60 s: the daemon may start before
     // SpringBoard has registered com.apple.CARenderServer at boot.
     mach_port_t renderPort = MACH_PORT_NULL;
@@ -277,10 +290,7 @@ static void * captureLoop(void *arg) {
         }
 
         // --- Capture the display ---
-        // CARenderServerRenderDisplay composites all display layers (app,
-        // SpringBoard, status bar, notification overlays, etc.) into `dst`.
-        // x=0, y=0 means no pixel offset; flags=0 is synchronous composite.
-        kr = CARenderServerRenderDisplay(renderPort, 0, dst, 0.0, 0.0, 0);
+        kr = gRenderDisplay(renderPort, 0, dst, 0.0, 0.0, 0);
 
         IOSurfaceUnlock(dst, 0, NULL);
 
@@ -304,6 +314,16 @@ static void * captureLoop(void *arg) {
 // =========================================================================
 
 static void * socketServer(void *arg) {
+    // Ensure the parent directory exists — on a fresh rootless install
+    // /var/jb/var/run/ may not have been created yet.
+    char sockDir[256];
+    strlcpy(sockDir, DICOY_SOCKET_PATH, sizeof(sockDir));
+    char *slash = strrchr(sockDir, '/');
+    if (slash && slash != sockDir) {
+        *slash = '\0';
+        mkdir(sockDir, 0755);
+    }
+
     unlink(DICOY_SOCKET_PATH); // Remove stale socket from a previous run
 
     int srvFd = socket(AF_UNIX, SOCK_STREAM, 0);
