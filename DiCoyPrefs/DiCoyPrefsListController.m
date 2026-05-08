@@ -158,6 +158,11 @@ static NSString *dicoyJBEnvString(void) {
         id value = [self readPreferenceValue:s];
         if (value) prefs[key] = value;
     }
+    NSString *dir = [kPrefsPlistPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
     [prefs writeToFile:kPrefsPlistPath atomically:YES];
     _dirty = NO;
     [self _updateSaveButton];
