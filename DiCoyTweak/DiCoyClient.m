@@ -117,11 +117,24 @@ static os_log_t gClientLog;
                 // -------------------------------------------------------
                 IOSurfaceRef surface = IOSurfaceLookup(msg.surface_id);
                 if (surface) {
+                    // Write on first success so we know frames are flowing.
+                    static BOOL sLogged = NO;
+                    if (!sLogged) {
+                        sLogged = YES;
+                        [[NSString stringWithFormat:@"ok:id=%u w=%u h=%u",
+                          msg.surface_id, msg.width, msg.height]
+                         writeToFile:@"/var/tmp/dicoy_surf.txt"
+                         atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    }
                     DiCoyFrameCallback cb = weak.frameCallback;
                     if (cb) cb(surface, msg.width, msg.height);
                     CFRelease(surface);
                 } else {
                     os_log_error(gClientLog, "IOSurfaceLookup(%u) returned nil", msg.surface_id);
+                    // Write every failure so the user can see it without syslog.
+                    [[NSString stringWithFormat:@"nil:id=%u", msg.surface_id]
+                     writeToFile:@"/var/tmp/dicoy_surf.txt"
+                     atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
             }
         }

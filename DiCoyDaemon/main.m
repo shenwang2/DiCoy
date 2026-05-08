@@ -217,13 +217,18 @@ static BOOL setupSurfaces(void) {
 // =========================================================================
 
 static void * captureLoop(void *arg) {
-    // Look up CARenderServer. This Mach service owns the display compositor.
+    // Look up CARenderServer. Retry up to 60 s: the daemon may start before
+    // SpringBoard has registered com.apple.CARenderServer at boot.
     mach_port_t renderPort = MACH_PORT_NULL;
-    kern_return_t kr = bootstrap_look_up(
-        bootstrap_port, "com.apple.CARenderServer", &renderPort
-    );
+    kern_return_t kr = KERN_FAILURE;
+    for (int attempt = 0; attempt < 60; attempt++) {
+        kr = bootstrap_look_up(bootstrap_port, "com.apple.CARenderServer", &renderPort);
+        if (kr == KERN_SUCCESS && renderPort != MACH_PORT_NULL) break;
+        os_log(gLog, "bootstrap_look_up attempt %d failed: %d – retrying in 1 s", attempt, kr);
+        sleep(1);
+    }
     if (kr != KERN_SUCCESS || renderPort == MACH_PORT_NULL) {
-        os_log_fault(gLog, "bootstrap_look_up(CARenderServer) failed: %d", kr);
+        os_log_fault(gLog, "bootstrap_look_up(CARenderServer) failed after 60 attempts: %d", kr);
         return NULL;
     }
     os_log(gLog, "CARenderServer port: %u", renderPort);

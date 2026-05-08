@@ -1107,7 +1107,12 @@ static void dicoyHookDelegate(Class cls) {
     CMSampleBufferRef frame = [mgr buildSampleBufferMatchingBuffer:nil];
     if (frame) {
         dLayer.opacity = 1.0f;
-        [dLayer flush];
+        // Only flush when the layer has entered a failed state; otherwise
+        // unconditional flush before every enqueue causes a blank frame on
+        // each display-link tick and wastes a render cycle.
+        if (dLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+            [dLayer flush];
+        }
         [dLayer enqueueSampleBuffer:frame];
         CFRelease(frame);
     }
