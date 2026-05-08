@@ -1,15 +1,13 @@
 // DiCoyDaemon/main.m
 //
-// Background daemon that captures the device screen at DICOY_TARGET_FPS and
-// delivers the frame handle (an IOSurface ID integer) to connected tweak
-// clients over a Unix Domain Socket. No pixel data ever crosses the socket;
-// only the 4-byte IOSurfaceID is sent, so the client process can call
-// IOSurfaceLookup() to map the same GPU memory without any memcpy.
+// Captures the live display framebuffer via IOMobileFramebuffer and delivers
+// each frame's IOSurfaceID to connected tweak clients over a Unix Domain Socket.
+// No pixel data crosses the socket; IOSurfaceLookup() in the tweak maps the same
+// GPU pages. The framebuffer's IOSurface is in the global IOSurface table by
+// system necessity, so cross-process lookup works without kIOSurfaceIsGlobal.
 
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurfaceRef.h>
-#import <CoreGraphics/CoreGraphics.h>
-#import <UIKit/UIKit.h>
 #import <IOKit/IOReturn.h>
 #import <mach/mach.h>
 #import <sys/socket.h>
@@ -21,68 +19,54 @@
 #import <os/log.h>
 #import <dlfcn.h>
 
-// bootstrap_look_up is not declared in the iOS SDK's mach/bootstrap.h
-extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name, mach_port_t *sp);
-
 #import "DiCoyProtocol.h"
 
 // =========================================================================
-// CARenderServer — loaded at runtime via dlopen to avoid a hard link-time
-// dependency on the private framework TBD stub (which may not be present
-// in the theos SDK shipped with CI). The function pointer is resolved once
-// in captureLoop() before the capture loop starts.
+// IOMobileFramebuffer — private framework, loaded via dlopen at runtime.
 // =========================================================================
 
-typedef kern_return_t (*CARenderServerRenderDisplay_t)(
-    mach_port_t  server,
-    uint32_t     display,
-    IOSurfaceRef surface,
-    CGFloat      x,
-    CGFloat      y,
-    uint32_t     flags
-);
-static CARenderServerRenderDisplay_t gRenderDisplay = NULL;
+typedef struct __IOMobileFramebuffer *IOMobileFramebufferRef;
+
+typedef IOReturn (*IOMFBOpen_t)(uint32_t              service,
+                                 task_port_t           task,
+                                 uint32_t              type,
+                                 IOMobileFramebufferRef *out);
+
+typedef IOReturn (*IOMFBGetSurface_t)(IOMobileFramebufferRef fb,
+                                       int                    layer,
+                                       IOSurfaceRef          *outSurface);
+
+// IOKit service lookup — forward-declare to avoid header dependency issues.
+extern uint32_t IOServiceGetMatchingService(uint32_t masterPort, CFDictionaryRef matching) __attribute__((weak));
+extern CFMutableDictionaryRef IOServiceMatching(const char *name) __attribute__((weak));
+extern kern_return_t IOObjectRelease(uint32_t object) __attribute__((weak));
+extern uint32_t kIOMasterPortDefault __attribute__((weak));
 
 // =========================================================================
-// Constants / configuration
+// Constants
 // =========================================================================
 
-#define MAX_CLIENTS       8
-#define SURFACE_POOL_SIZE 2  // double-buffered: daemon writes A while clients read B
+#define MAX_CLIENTS 8
 
 // =========================================================================
 // Globals
 // =========================================================================
 
 static os_log_t gLog;
-static CGFloat  gDisplayW = 0, gDisplayH = 0;
 
-// --- IOSurface double-buffer pool ---
-// We pre-allocate SURFACE_POOL_SIZE surfaces and round-robin through them.
-// The daemon renders into gSurfacePool[gWriteIdx]; on the next frame it
-// advances gWriteIdx and renders into the other surface. Clients receive
-// the surface ID for the most-recently completed render; they have until
-// the NEXT frame to finish reading before the daemon reclaims that slot.
-static IOSurfaceRef    gSurfacePool[SURFACE_POOL_SIZE];
-static uint32_t        gSurfaceIDs[SURFACE_POOL_SIZE];
-static int             gWriteIdx = 0;
-static pthread_mutex_t gSurfaceMutex = PTHREAD_MUTEX_INITIALIZER;
-
-// --- Client tracking ---
 typedef struct {
-    int  fd;      // Socket fd; -1 means this slot is unused
-    BOOL active;  // Client has sent kDicoyMsgStartCapture
+    int  fd;
+    BOOL active;
 } DicoyClient;
 
 static DicoyClient     gClients[MAX_CLIENTS];
 static int             gActiveCount = 0;
-static pthread_mutex_t gClientsMtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t gClientsMtx  = PTHREAD_MUTEX_INITIALIZER;
 
 // =========================================================================
 // Forward declarations
 // =========================================================================
 
-static BOOL   setupSurfaces(void);
 static void * captureLoop(void *arg);
 static void * socketServer(void *arg);
 static void * handleClient(void *arg);
@@ -91,7 +75,7 @@ static void   removeClient(int fd);
 static int    activeCount(void);
 
 // =========================================================================
-// Signal handler – remove the socket file so a fresh daemon start works
+// Signal handler
 // =========================================================================
 
 static void onSignal(int sig) {
@@ -106,37 +90,17 @@ static void onSignal(int sig) {
 
 int main(int argc, char *argv[]) {
     @autoreleasepool {
-        // Create log and socket directories before redirecting output.
-        // launchd writes stdout/stderr to StandardOutPath/StandardErrorPath;
-        // if the directory doesn't exist it silently drops the output.
         mkdir(DICOY_JB_PREFIX "/var/log", 0755);
         mkdir(DICOY_JB_PREFIX "/var/run", 0755);
 
         gLog = os_log_create("com.dicoy.daemon", "main");
         os_log(gLog, "DiCoyDaemon starting (PID %d)", getpid());
+        fprintf(stderr, "DiCoyDaemon starting PID=%d\n", getpid());
 
         signal(SIGTERM, onSignal);
         signal(SIGINT,  onSignal);
 
-        // Initialise client table (static globals are zero-init, but fd=0
-        // is stdin, so we must explicitly set all fds to the sentinel -1).
         for (int i = 0; i < MAX_CLIENTS; i++) gClients[i].fd = -1;
-
-        // Query native display resolution in physical pixels.
-        CGRect nb = [UIScreen mainScreen].nativeBounds;
-        gDisplayW = nb.size.width;
-        gDisplayH = nb.size.height;
-        if (gDisplayW == 0) {
-            // Hard-coded fallback (iPhone 12 Pro physical resolution).
-            gDisplayW = 1170; gDisplayH = 2532;
-            os_log_error(gLog, "CGDisplay query failed, falling back to 1170x2532");
-        }
-        os_log(gLog, "Display: %.0f x %.0f", gDisplayW, gDisplayH);
-
-        if (!setupSurfaces()) {
-            os_log_fault(gLog, "IOSurface pool creation failed – aborting");
-            return 1;
-        }
 
         // Socket server runs on a background thread; capture loop on main thread.
         pthread_t serverThread;
@@ -149,158 +113,92 @@ int main(int argc, char *argv[]) {
 }
 
 // =========================================================================
-// setupSurfaces
-//
-// Allocates SURFACE_POOL_SIZE IOSurfaces in GPU-shared memory.
-//
-// Key IOSurface properties:
-//   kIOSurfaceIsGlobal  – allows any process to look up the surface by its
-//                         integer ID via IOSurfaceLookup(), without needing
-//                         a Mach port handoff. This is what makes the
-//                         zero-copy cross-process sharing work.
-//   kIOSurfacePixelFormat – 0x42475241 == 'BGRA' == kCVPixelFormatType_32BGRA.
-//                           CARenderServer produces BGRA; CoreVideo and
-//                           AVFoundation expect BGRA for camera-style buffers.
-// =========================================================================
-
-static BOOL setupSurfaces(void) {
-    int w = (int)gDisplayW, h = (int)gDisplayH;
-
-    NSDictionary *props = @{
-        (id)kIOSurfaceWidth:           @(w),
-        (id)kIOSurfaceHeight:          @(h),
-        (id)kIOSurfaceBytesPerElement: @(4),        // 4 bytes per pixel (BGRA)
-        (id)kIOSurfaceBytesPerRow:     @(w * 4),
-        (id)kIOSurfaceAllocSize:       @(w * h * 4),
-        (id)kIOSurfacePixelFormat:     @(0x42475241), // 'BGRA'
-        // kIOSurfaceIsGlobal is the critical flag: it registers the surface in
-        // a kernel-level table so that IOSurfaceLookup(id) works from any
-        // process on the device, including sandboxed apps running our tweak.
-        (id)kIOSurfaceIsGlobal:        @YES,
-    };
-
-    for (int i = 0; i < SURFACE_POOL_SIZE; i++) {
-        gSurfacePool[i] = IOSurfaceCreate((__bridge CFDictionaryRef)props);
-        if (!gSurfacePool[i]) {
-            os_log_error(gLog, "IOSurfaceCreate failed for slot %d", i);
-            return NO;
-        }
-        gSurfaceIDs[i] = IOSurfaceGetID(gSurfacePool[i]);
-        os_log(gLog, "Surface[%d]: id=%u", i, gSurfaceIDs[i]);
-    }
-    return YES;
-}
-
-// =========================================================================
 // captureLoop
 //
-// The main capture loop. Runs on the process's main thread.
-//
-// Algorithm:
-//  1. Obtain a Mach send-right to CARenderServer via bootstrap.
-//  2. Sleep when no clients are connected (battery conservation).
-//  3. On each frame deadline, select the next write slot in the pool.
-//  4. Lock the IOSurface for GPU write, call CARenderServerRenderDisplay,
-//     then unlock.
-//  5. Broadcast the surface ID to all active clients over the socket.
-//
-// Zero-copy explanation:
-//  CARenderServerRenderDisplay writes directly into the IOSurface's GPU
-//  memory. IOSurfaceLookup() in the tweak process maps the SAME physical
-//  memory pages (via the IOSurface kernel object). No bytes are copied at
-//  any point in the pipeline; the client just gets a new pointer alias.
+// Opens IOMobileFramebuffer to get the display's composited front-buffer.
+// On each frame deadline, reads the current surface ID and broadcasts it.
+// The surface is owned by the display hardware; we never lock or release it.
 // =========================================================================
 
 static void * captureLoop(void *arg) {
-    // Resolve CARenderServerRenderDisplay from the private framework via dlopen.
-    // This avoids a hard link-time dependency on the CARenderServer TBD stub:
-    // the linker never sees the symbol, so the binary always loads cleanly.
-    if (!gRenderDisplay) {
-        void *lib = dlopen(
-            "/System/Library/PrivateFrameworks/CARenderServer.framework/CARenderServer",
-            RTLD_LAZY | RTLD_GLOBAL);
-        if (lib) {
-            gRenderDisplay = (CARenderServerRenderDisplay_t)
-                dlsym(lib, "CARenderServerRenderDisplay");
-        }
-        if (!gRenderDisplay) {
-            os_log_fault(gLog, "dlopen/dlsym CARenderServerRenderDisplay failed: %s", dlerror());
-            return NULL;
-        }
-        os_log(gLog, "CARenderServerRenderDisplay loaded via dlopen");
+    void *lib = dlopen(
+        "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
+        RTLD_LAZY | RTLD_GLOBAL);
+    if (lib) {
+        fprintf(stderr, "DiCoyDaemon: IOMobileFramebuffer.framework loaded\n");
+    } else {
+        fprintf(stderr, "DiCoyDaemon: dlopen IOMobileFramebuffer: %s — trying RTLD_DEFAULT\n",
+                dlerror());
     }
 
-    // Look up CARenderServer. Retry up to 60 s: the daemon may start before
-    // SpringBoard has registered com.apple.CARenderServer at boot.
-    mach_port_t renderPort = MACH_PORT_NULL;
-    kern_return_t kr = KERN_FAILURE;
-    for (int attempt = 0; attempt < 60; attempt++) {
-        kr = bootstrap_look_up(bootstrap_port, "com.apple.CARenderServer", &renderPort);
-        if (kr == KERN_SUCCESS && renderPort != MACH_PORT_NULL) break;
-        os_log(gLog, "bootstrap_look_up attempt %d failed: %d – retrying in 1 s", attempt, kr);
-        sleep(1);
-    }
-    if (kr != KERN_SUCCESS || renderPort == MACH_PORT_NULL) {
-        os_log_fault(gLog, "bootstrap_look_up(CARenderServer) failed after 60 attempts: %d", kr);
+    void *search = lib ?: RTLD_DEFAULT;
+    IOMFBOpen_t     fbOpen       = (IOMFBOpen_t)dlsym(search, "IOMobileFramebufferOpen");
+    IOMFBGetSurface_t fbGetSurface = (IOMFBGetSurface_t)dlsym(search,
+                                        "IOMobileFramebufferGetLayerDefaultSurface");
+
+    if (!fbOpen || !fbGetSurface) {
+        fprintf(stderr, "DiCoyDaemon: IOMobileFramebuffer symbols missing: %s\n", dlerror());
         return NULL;
     }
-    os_log(gLog, "CARenderServer port: %u", renderPort);
+    fprintf(stderr, "DiCoyDaemon: IOMobileFramebuffer symbols resolved\n");
 
-    // Nanoseconds per frame for DICOY_TARGET_FPS.
+    uint32_t svc = IOServiceGetMatchingService
+        ? IOServiceGetMatchingService(kIOMasterPortDefault,
+                                      IOServiceMatching("IOMobileFramebuffer"))
+        : 0;
+    if (!svc) {
+        fprintf(stderr, "DiCoyDaemon: IOMobileFramebuffer IOService not found\n");
+        return NULL;
+    }
+    fprintf(stderr, "DiCoyDaemon: IOService=0x%x\n", svc);
+
+    IOMobileFramebufferRef fb = NULL;
+    IOReturn openRet = fbOpen(svc, mach_task_self(), 0, &fb);
+    if (IOObjectRelease) IOObjectRelease(svc);
+
+    if (openRet != kIOReturnSuccess || !fb) {
+        fprintf(stderr, "DiCoyDaemon: IOMobileFramebufferOpen failed: 0x%x\n", openRet);
+        return NULL;
+    }
+    fprintf(stderr, "DiCoyDaemon: IOMobileFramebuffer opened\n");
+
+    // Log initial surface dimensions/format so the log file is useful.
+    {
+        IOSurfaceRef s = NULL;
+        if (fbGetSurface(fb, 0, &s) == kIOReturnSuccess && s) {
+            fprintf(stderr, "DiCoyDaemon: surface %zu×%zu fmt=0x%08x id=%u\n",
+                    IOSurfaceGetWidth(s), IOSurfaceGetHeight(s),
+                    IOSurfaceGetPixelFormat(s), IOSurfaceGetID(s));
+        } else {
+            fprintf(stderr, "DiCoyDaemon: initial GetLayerDefaultSurface failed\n");
+        }
+    }
+
     const uint64_t frameIntervalNs = (uint64_t)(1e9 / DICOY_TARGET_FPS);
     uint64_t lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
 
     while (1) {
-        // --- Battery gate ---
-        // When the camera is not open in any app, no client sends
-        // kDicoyMsgStartCapture, so activeCount() stays 0. We poll at
-        // 10 Hz instead of 30/60 Hz so the daemon is nearly idle.
         if (activeCount() == 0) {
-            usleep(100000); // 100 ms
+            usleep(100000); // 10 Hz idle poll
             continue;
         }
 
-        // --- Frame-rate limiter ---
         uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
         int64_t remaining = (int64_t)frameIntervalNs - (int64_t)(now - lastFrameNs);
         if (remaining > 0) {
-            // Sleep for half the remaining time to avoid overshooting due to
-            // usleep's minimum resolution (typically ~50 µs on iOS).
             usleep((useconds_t)(remaining / 2000));
             continue;
         }
         lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
 
-        // --- Select write slot (round-robin) ---
-        pthread_mutex_lock(&gSurfaceMutex);
-        int slot = gWriteIdx;
-        gWriteIdx = (gWriteIdx + 1) % SURFACE_POOL_SIZE;
-        pthread_mutex_unlock(&gSurfaceMutex);
+        IOSurfaceRef surface = NULL;
+        if (fbGetSurface(fb, 0, &surface) != kIOReturnSuccess || !surface) continue;
 
-        IOSurfaceRef dst = gSurfacePool[slot];
-
-        // --- Lock the surface for write ---
-        // IOSurfaceLock with options=0 means "wait until any GPU reader is
-        // done before granting write access". This prevents tearing when a
-        // client CVPixelBuffer is mid-read on the GPU.
-        IOReturn lockRet = IOSurfaceLock(dst, 0, NULL);
-        if (lockRet != kIOReturnSuccess) {
-            os_log_error(gLog, "IOSurfaceLock failed: 0x%x", lockRet);
-            continue;
-        }
-
-        // --- Capture the display ---
-        kr = gRenderDisplay(renderPort, 0, dst, 0.0, 0.0, 0);
-
-        IOSurfaceUnlock(dst, 0, NULL);
-
-        if (kr != KERN_SUCCESS) {
-            os_log_error(gLog, "CARenderServerRenderDisplay failed: %d", kr);
-            continue;
-        }
-
-        // --- Deliver the frame ID to all clients ---
-        broadcastFrame(gSurfaceIDs[slot], (uint16_t)gDisplayW, (uint16_t)gDisplayH);
+        uint32_t sid = IOSurfaceGetID(surface);
+        uint16_t w   = (uint16_t)IOSurfaceGetWidth(surface);
+        uint16_t h   = (uint16_t)IOSurfaceGetHeight(surface);
+        broadcastFrame(sid, w, h);
+        // surface is owned by display hardware — do NOT CFRelease
     }
 
     return NULL;
@@ -308,27 +206,19 @@ static void * captureLoop(void *arg) {
 
 // =========================================================================
 // socketServer
-//
-// Listens on DICOY_SOCKET_PATH and hands each connection to a dedicated
-// thread. The thread blocks in recv() waiting for client commands.
 // =========================================================================
 
 static void * socketServer(void *arg) {
-    // Ensure the parent directory exists — on a fresh rootless install
-    // /var/jb/var/run/ may not have been created yet.
     char sockDir[256];
     strlcpy(sockDir, DICOY_SOCKET_PATH, sizeof(sockDir));
     char *slash = strrchr(sockDir, '/');
-    if (slash && slash != sockDir) {
-        *slash = '\0';
-        mkdir(sockDir, 0755);
-    }
+    if (slash && slash != sockDir) { *slash = '\0'; mkdir(sockDir, 0755); }
 
-    unlink(DICOY_SOCKET_PATH); // Remove stale socket from a previous run
+    unlink(DICOY_SOCKET_PATH);
 
     int srvFd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (srvFd < 0) {
-        os_log_fault(gLog, "socket(): %s", strerror(errno));
+        fprintf(stderr, "DiCoyDaemon: socket(): %s\n", strerror(errno));
         return NULL;
     }
 
@@ -337,62 +227,45 @@ static void * socketServer(void *arg) {
     strlcpy(addr.sun_path, DICOY_SOCKET_PATH, sizeof(addr.sun_path));
 
     if (bind(srvFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        os_log_fault(gLog, "bind(%s): %s", DICOY_SOCKET_PATH, strerror(errno));
+        fprintf(stderr, "DiCoyDaemon: bind(%s): %s\n", DICOY_SOCKET_PATH, strerror(errno));
         close(srvFd);
         return NULL;
     }
 
-    // 0777 so that sandboxed app processes (different UID/GID from root)
-    // can connect. On a rootless jailbreak the path is in /var/jb which is
-    // already world-traversable.
     chmod(DICOY_SOCKET_PATH, 0777);
-
     listen(srvFd, MAX_CLIENTS);
-    os_log(gLog, "Listening on %s", DICOY_SOCKET_PATH);
+    fprintf(stderr, "DiCoyDaemon: listening on %s\n", DICOY_SOCKET_PATH);
 
     while (1) {
         int cfd = accept(srvFd, NULL, NULL);
-        if (cfd < 0) { continue; }
+        if (cfd < 0) continue;
 
-        // Register in the client table.
         pthread_mutex_lock(&gClientsMtx);
         BOOL registered = NO;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (gClients[i].fd < 0) {
-                gClients[i].fd = cfd;
+                gClients[i].fd     = cfd;
                 gClients[i].active = NO;
-                registered = YES;
+                registered         = YES;
                 break;
             }
         }
         pthread_mutex_unlock(&gClientsMtx);
 
-        if (!registered) {
-            os_log_error(gLog, "Too many clients, rejecting fd=%d", cfd);
-            close(cfd);
-            continue;
-        }
+        if (!registered) { close(cfd); continue; }
 
-        os_log(gLog, "Client connected (fd=%d)", cfd);
-
-        // Spawn a per-client thread. The fd is heap-allocated so the thread
-        // can safely free it after the connection closes.
+        fprintf(stderr, "DiCoyDaemon: client connected fd=%d\n", cfd);
         int *fdp = malloc(sizeof(int));
         *fdp = cfd;
         pthread_t t;
         pthread_create(&t, NULL, handleClient, fdp);
         pthread_detach(t);
     }
-
     return NULL;
 }
 
 // =========================================================================
 // handleClient
-//
-// Blocks reading fixed-size DicoyMessage packets from one client. Mutates
-// gClients and gActiveCount when the client starts or stops capture, then
-// cleans up when the connection drops.
 // =========================================================================
 
 static void *handleClient(void *arg) {
@@ -402,12 +275,8 @@ static void *handleClient(void *arg) {
 
     while (1) {
         ssize_t n = recv(fd, &msg, sizeof(msg), MSG_WAITALL);
-        if (n != (ssize_t)sizeof(msg)) break; // EOF or error
-
-        if (msg.magic != DICOY_MAGIC) {
-            os_log_error(gLog, "fd=%d: bad magic 0x%04x", fd, msg.magic);
-            break;
-        }
+        if (n != (ssize_t)sizeof(msg)) break;
+        if (msg.magic != DICOY_MAGIC) break;
 
         switch ((DicoyMessageType)msg.type) {
             case kDicoyMsgStartCapture:
@@ -420,7 +289,7 @@ static void *handleClient(void *arg) {
                     }
                 }
                 pthread_mutex_unlock(&gClientsMtx);
-                os_log(gLog, "fd=%d: START_CAPTURE (active=%d)", fd, gActiveCount);
+                fprintf(stderr, "DiCoyDaemon: fd=%d START_CAPTURE active=%d\n", fd, gActiveCount);
                 break;
 
             case kDicoyMsgStopCapture:
@@ -433,7 +302,6 @@ static void *handleClient(void *arg) {
                     }
                 }
                 pthread_mutex_unlock(&gClientsMtx);
-                os_log(gLog, "fd=%d: STOP_CAPTURE (active=%d)", fd, gActiveCount);
                 break;
 
             case kDicoyMsgPing: {
@@ -442,24 +310,18 @@ static void *handleClient(void *arg) {
                 break;
             }
 
-            default:
-                os_log_error(gLog, "fd=%d: unknown type 0x%02x", fd, msg.type);
-                break;
+            default: break;
         }
     }
 
-    os_log(gLog, "Client disconnected (fd=%d)", fd);
+    fprintf(stderr, "DiCoyDaemon: client disconnected fd=%d\n", fd);
     removeClient(fd);
     close(fd);
     return NULL;
 }
 
 // =========================================================================
-// broadcastFrame
-//
-// Sends a FRAME_READY message to every active client.
-// MSG_DONTWAIT: if a client's socket buffer is full, we skip it (frame
-// drop) rather than blocking the capture loop for a slow reader.
+// broadcastFrame / removeClient / activeCount
 // =========================================================================
 
 static void broadcastFrame(uint32_t surfID, uint16_t w, uint16_t h) {
@@ -471,12 +333,10 @@ static void broadcastFrame(uint32_t surfID, uint16_t w, uint16_t h) {
         .height     = h,
         .timestamp  = (uint32_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL),
     };
-
     pthread_mutex_lock(&gClientsMtx);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (gClients[i].fd >= 0 && gClients[i].active) {
+        if (gClients[i].fd >= 0 && gClients[i].active)
             send(gClients[i].fd, &msg, sizeof(msg), MSG_DONTWAIT);
-        }
     }
     pthread_mutex_unlock(&gClientsMtx);
 }
@@ -500,32 +360,3 @@ static int activeCount(void) {
     pthread_mutex_unlock(&gClientsMtx);
     return n;
 }
-
-// =========================================================================
-// IOMobileFramebuffer alternative (reference, not used above)
-//
-// CARenderServerRenderDisplay (used above) composites ALL layers into the
-// destination surface. If you only need the raw display hardware buffer
-// (without compositor overlays), use IOMobileFramebuffer instead:
-//
-//   #import <IOKit/IOKitLib.h>
-//   typedef struct __IOMobileFramebuffer *IOMobileFramebufferRef;
-//   extern IOReturn IOMobileFramebufferOpen(
-//       io_service_t service, task_port_t task,
-//       uint32_t type, IOMobileFramebufferRef *fb);
-//   extern IOReturn IOMobileFramebufferGetLayerDefaultSurface(
-//       IOMobileFramebufferRef fb, int layer, IOSurfaceRef *outSurface);
-//
-//   io_service_t svc = IOServiceGetMatchingService(
-//       kIOMasterPortDefault, IOServiceMatching("IOMobileFramebuffer"));
-//   IOMobileFramebufferRef fb;
-//   IOMobileFramebufferOpen(svc, mach_task_self(), 0, &fb);
-//   IOSurfaceRef rawSurface;
-//   IOMobileFramebufferGetLayerDefaultSurface(fb, 0, &rawSurface);
-//   // rawSurface IS the live framebuffer. Broadcast its ID directly –
-//   // no CARenderServerRenderDisplay call needed. Note: this surface
-//   // is owned by the display hardware; never call IOSurfaceLock on it
-//   // for an extended period or the display will freeze.
-//   uint32_t sid = IOSurfaceGetID(rawSurface);
-//   broadcastFrame(sid, w, h);
-// =========================================================================

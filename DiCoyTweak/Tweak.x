@@ -276,11 +276,15 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
         if (fd) targetFmt = CMFormatDescriptionGetMediaSubType(fd);
     }
 
-    // Wrap IOSurface as a BGRA CVPixelBuffer (zero-copy; explicit format type required).
+    // Read the actual pixel format from the IOSurface rather than assuming BGRA.
+    // The display framebuffer is typically BGRA on iOS but may differ on HDR displays.
+    OSType surfaceFmt = IOSurfaceGetPixelFormat(surface);
+    if (!surfaceFmt) surfaceFmt = kCVPixelFormatType_32BGRA;
+
     NSDictionary *pbAttrs = @{
         (id)kCVPixelBufferWidthKey:               @(w),
         (id)kCVPixelBufferHeightKey:              @(h),
-        (id)kCVPixelBufferPixelFormatTypeKey:     @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferPixelFormatTypeKey:     @(surfaceFmt),
         (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
     };
     CVPixelBufferRef surfacePix = NULL;
@@ -296,8 +300,7 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     dispatch_once(&sCICtxOnce, ^{ sCICtx = [CIContext contextWithOptions:nil]; });
 
     CVPixelBufferRef pix = surfacePix;
-    BOOL needsConvert = (targetW != w || targetH != h ||
-                         targetFmt != kCVPixelFormatType_32BGRA);
+    BOOL needsConvert = (targetW != w || targetH != h || targetFmt != surfaceFmt);
     if (needsConvert) {
         CIImage *ciImg = [CIImage imageWithCVPixelBuffer:surfacePix];
         if (targetW != w || targetH != h) {
