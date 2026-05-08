@@ -23,4 +23,8 @@ typedef void (^DiCoyFrameCallback)(IOSurfaceRef surface, uint16_t width, uint16_
 - (void)startCapture;
 - (void)stopCapture;
 
+// Attempt to reconnect if currently disconnected. Rate-limited to once per 3 s;
+// the actual connect runs on the internal read queue so callers never block.
+- (void)reconnectIfNeeded;
+
 @end

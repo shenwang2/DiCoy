@@ -9,6 +9,7 @@
 #import <sys/socket.h>
 #import <sys/un.h>
 #import <os/log.h>
+#import <QuartzCore/QuartzCore.h>
 
 static os_log_t gClientLog;
 
@@ -131,6 +132,23 @@ static os_log_t gClientLog;
 }
 
 - (BOOL)isConnected { return _connected; }
+
+- (void)reconnectIfNeeded {
+    if (_connected) return;
+    // Rate-limit reconnect attempts to once per 3 seconds.
+    static CFTimeInterval sLastAttempt = 0;
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - sLastAttempt < 3.0) return;
+    sLastAttempt = now;
+
+    dispatch_async(_readQueue, ^{
+        if (self->_connected) return;
+        if ([self connect]) {
+            self->_capturing = NO;
+            [self startCapture];
+        }
+    });
+}
 
 - (void)dealloc {
     [self disconnect];

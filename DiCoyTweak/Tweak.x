@@ -129,7 +129,13 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
                            pixelFormat:kCVPixelFormatType_32BGRA];
     } else {
         self.currentMode = kDicoyModeScreenMirror;
-        if ([self.client connect]) [self.client startCapture];
+        if ([self.client connect]) {
+            [self.client startCapture];
+        } else {
+            // Daemon not yet running; reconnectIfNeeded will retry each frame callback.
+            [@"connect_failed_on_start" writeToFile:@"/var/tmp/dicoy_debug.txt"
+                atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
     }
 }
 
@@ -249,7 +255,12 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     uint16_t w = self.surfaceWidth, h = self.surfaceHeight;
     if (surface) CFRetain(surface);
     os_unfair_lock_unlock(&_surfaceLock);
-    if (!surface) return NULL;
+    if (!surface) {
+        // No frame yet — daemon may have started after the app. Retry the connection
+        // every 3 s without blocking the camera callback queue.
+        [self.client reconnectIfNeeded];
+        return NULL;
+    }
 
     // Infer target pixel format and dimensions from the real camera frame.
     // The daemon surface is always BGRA; many camera pipelines expect 420v/420f.
