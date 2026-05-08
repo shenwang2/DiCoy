@@ -19,10 +19,10 @@
 // libSandy applies the DiCoy sandbox-extension profile.
 #define DICOY_SOCKET_PATH "/var/tmp/dicoy.sock"
 
-// Preferences plist path – used by DiCoyTweak to read the current mode and by
-// DiCoyPrefs to write it. libSandy (applied in %ctor) grants the injected process
-// read-write access to this path via the DiCoy sandbox profile.
-#define DICOY_PREFS_PATH  DICOY_JB_PREFIX "/var/mobile/Library/Preferences/com.dicoy.prefs.plist"
+// Preferences plist path – user preferences always live at the real mobile home
+// regardless of jailbreak type; the JB prefix is for JB binaries/libraries only.
+// libSandy grants the injected process read-write access via the DiCoy profile.
+#define DICOY_PREFS_PATH  "/var/mobile/Library/Preferences/com.dicoy.prefs.plist"
 
 // Darwin notification key posted by DiCoyPrefs when the user changes modes.
 // The tweak subscribes to this to reconfigure itself without a respring.

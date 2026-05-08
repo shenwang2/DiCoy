@@ -8,14 +8,16 @@
 	</array>
 	<key>Extensions</key>
 	<array>
+		<!-- Preferences plist – real mobile home, no JB prefix -->
 		<dict>
 			<key>type</key>
 			<string>file</string>
 			<key>extension_class</key>
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
-			<string>%%JB_PREFIX%%/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
+			<string>/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
 		</dict>
+		<!-- Socket -->
 		<dict>
 			<key>type</key>
 			<string>file</string>
@@ -24,6 +26,32 @@
 			<key>path</key>
 			<string>/var/tmp/dicoy.sock</string>
 		</dict>
+		<!-- Diagnostic files written by the tweak inside camera-app processes -->
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_mode.txt</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_surf.txt</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_debug.txt</string>
+		</dict>
+		<!-- IOSurface cross-process lookup -->
 		<dict>
 			<key>type</key>
 			<string>iokit_user_client</string>

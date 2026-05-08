@@ -103,13 +103,8 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
 
 - (void)startMirroring {
     if (self.active) return;
-    // Try the JB-prefixed path first; fall back to the cfprefsd path in case
-    // Settings.app couldn't write to the JB prefix (permission issue on some setups).
     NSDictionary *prefs =
-        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH]
-        ?: [NSDictionary dictionaryWithContentsOfFile:
-               @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist"]
-        ?: @{};
+        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
     [mode writeToFile:@"/var/tmp/dicoy_mode.txt"
            atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -1137,10 +1132,7 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
                                  CFDictionaryRef          userInfo) {
     DiCoyTweakManager *mgr = [DiCoyTweakManager sharedManager];
     NSDictionary *prefs =
-        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH]
-        ?: [NSDictionary dictionaryWithContentsOfFile:
-               @"/var/mobile/Library/Preferences/com.dicoy.prefs.plist"]
-        ?: @{};
+        [NSDictionary dictionaryWithContentsOfFile:@DICOY_PREFS_PATH] ?: @{};
     NSString *mode = prefs[@"mode"] ?: @"off";
     // Always stop first so startMirroring can re-read the new prefs cleanly.
     if (mgr.active) [mgr stopMirroring];
