@@ -1,14 +1,12 @@
 #!/bin/sh
 set -e
 
-# Detect jailbreak root prefix.
 if [ -d /var/jb ] && [ -d /var/jb/Library ]; then
     P="/var/jb"
 else
     P=""
 fi
 
-# Log file so we can see what happened even if everything is redirected.
 LOG="${P}/var/log/dicoy-install.log"
 mkdir -p "${P}/var/log"
 mkdir -p "${P}/var/run"
@@ -67,47 +65,22 @@ chmod 644 "${SANDY_DIR}/DiCoy.plist"
 echo "Sandy profile written: ${SANDY_DIR}/DiCoy.plist"
 
 # --------------------------------------------------------------------------
-# Daemon registration
+# Clean up old standalone daemon (replaced by SpringBoard-hosted server).
 # --------------------------------------------------------------------------
-DAEMON_BIN="${P}/usr/sbin/DiCoyDaemon"
 LAUNCHD_PLIST="${P}/Library/LaunchDaemons/com.dicoy.daemon.plist"
+DAEMON_BIN="${P}/usr/sbin/DiCoyDaemon"
 
-echo "Daemon binary: $DAEMON_BIN"
-echo "LaunchDaemon plist: $LAUNCHD_PLIST"
-
-if [ ! -f "$DAEMON_BIN" ]; then
-    echo "ERROR: daemon binary not found at $DAEMON_BIN — skipping registration"
-else
-    echo "Daemon binary exists ($(ls -la "$DAEMON_BIN"))"
-    chmod 755 "$DAEMON_BIN"
+if [ -f "$LAUNCHD_PLIST" ]; then
+    LAUNCHCTL="${P}/usr/bin/launchctl"
+    [ -x "$LAUNCHCTL" ] || LAUNCHCTL="launchctl"
+    "$LAUNCHCTL" bootout system "$LAUNCHD_PLIST" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST"
+    echo "Removed old LaunchDaemon plist"
 fi
 
-if [ ! -f "$LAUNCHD_PLIST" ]; then
-    echo "ERROR: LaunchDaemon plist not found at $LAUNCHD_PLIST — skipping registration"
-else
-    echo "LaunchDaemon plist exists"
-
-    # Prefer the JB-patched launchctl; fall back to system launchctl.
-    LAUNCHCTL="${P}/usr/bin/launchctl"
-    if [ ! -x "$LAUNCHCTL" ]; then
-        LAUNCHCTL="launchctl"
-    fi
-    echo "Using launchctl: $LAUNCHCTL"
-
-    # Remove any previous instance (ignore errors — nothing to remove on fresh install).
-    "$LAUNCHCTL" bootout system "$LAUNCHD_PLIST" 2>&1 || true
-
-    # Register and start the daemon.
-    if "$LAUNCHCTL" bootstrap system "$LAUNCHD_PLIST" 2>&1; then
-        echo "launchctl bootstrap: SUCCESS"
-    else
-        echo "launchctl bootstrap failed — trying launchctl load"
-        if "$LAUNCHCTL" load "$LAUNCHD_PLIST" 2>&1; then
-            echo "launchctl load: SUCCESS"
-        else
-            echo "launchctl load also failed — daemon will start on next reboot"
-        fi
-    fi
+if [ -f "$DAEMON_BIN" ]; then
+    rm -f "$DAEMON_BIN"
+    echo "Removed old daemon binary"
 fi
 
 echo "=== DiCoy postinst done ==="
