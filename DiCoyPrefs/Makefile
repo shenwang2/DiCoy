@@ -23,18 +23,7 @@ DiCoyPrefs_RESOURCE_DIRS = Resources
 DiCoyPrefs_INSTALL_PATH = /Library/PreferenceBundles
 
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-  _PREFLOADER_LAYOUT = var/jb/Library/PreferenceLoader/Preferences
-  JB_PREFIX          = /var/jb
   DiCoyPrefs_CFLAGS += -DDICOY_ROOTLESS=1
-else
-  _PREFLOADER_LAYOUT = Library/PreferenceLoader/Preferences
-  JB_PREFIX          =
 endif
-
-# Stage the PreferenceLoader entry plist so it is included in the .deb.
-before-package::
-	mkdir -p $(THEOS_PROJECT_DIR)/layout/$(_PREFLOADER_LAYOUT)
-	cp $(THEOS_PROJECT_DIR)/entry.plist \
-	    $(THEOS_PROJECT_DIR)/layout/$(_PREFLOADER_LAYOUT)/DiCoy.plist
 
 include $(THEOS)/makefiles/bundle.mk
