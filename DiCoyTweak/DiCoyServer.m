@@ -29,10 +29,12 @@
 // CARenderServerRenderDisplay — merged into QuartzCore on iOS 15+
 // =========================================================================
 
-typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t    port,
-                                             CFStringRef    display,
-                                             IOSurfaceRef   surface,
-                                             int            flags);
+// On iOS 14+ the second argument changed from CFStringRef to a numeric
+// display UID (uint64_t). UID 0 renders blank; UID 1 is the primary display.
+typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t  port,
+                                             uint64_t     displayUID,
+                                             IOSurfaceRef surface,
+                                             int          flags);
 
 // =========================================================================
 // NSXPCInterface helper — whitelists IOSurface for receiveFrame:width:height:
@@ -158,9 +160,25 @@ static int srvActiveCount(void) {
     if (srvActiveCount() == 0) return;
     if (!gSurface)             return;
 
-    // "LCD" is the internal display identifier on iPhone.
-    // NULL renders no display and produces a black surface.
-    kern_return_t kr = self.renderFn(0, CFSTR("LCD"), gSurface, 0);
+    // Probe display UIDs 1 and 2; UID 0 succeeds but renders blank.
+    // Log which UID works and cache it so we stop probing after the first success.
+    static uint64_t sWorkingUID  = UINT64_MAX; // UINT64_MAX = not yet found
+    static BOOL     sProbedAll   = NO;
+    if (sWorkingUID == UINT64_MAX && !sProbedAll) {
+        for (uint64_t uid = 1; uid <= 4; uid++) {
+            if (self.renderFn(0, uid, gSurface, 0) == KERN_SUCCESS) {
+                sWorkingUID = uid;
+                srvLog("CARenderServerRenderDisplay: display UID %llu works", (unsigned long long)uid);
+                break;
+            }
+        }
+        if (sWorkingUID == UINT64_MAX) {
+            sProbedAll   = YES;
+            sWorkingUID  = 0;   // fall back to UID 0 (blank but non-crashing)
+            srvLog("CARenderServerRenderDisplay: no UID 1-4 worked, using UID 0 (blank)");
+        }
+    }
+    kern_return_t kr = self.renderFn(0, sWorkingUID, gSurface, 0);
     if (kr != 0) {
         self.failCount++;
         if (self.failCount % 30 == 1)
