@@ -68,6 +68,20 @@ jobs:
       - name: Set DEBIAN script permissions
         run: chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
 
+      - name: Generate LaunchDaemon plist
+        run: |
+          if [[ "${{ matrix.scheme }}" == "rootless" ]]; then
+            JB_PREFIX="/var/jb"
+            PLIST_DIR="layout/var/jb/Library/LaunchDaemons"
+          else
+            JB_PREFIX=""
+            PLIST_DIR="layout/Library/LaunchDaemons"
+          fi
+          mkdir -p "$PLIST_DIR"
+          sed "s|%%JB_PREFIX%%|${JB_PREFIX}|g" \
+            DiCoyDaemon/com.dicoy.daemon.plist.in \
+            > "${PLIST_DIR}/com.dicoy.daemon.plist"
+
       - name: Build (${{ matrix.label }})
         run: |
           make clean 2>/dev/null || true
