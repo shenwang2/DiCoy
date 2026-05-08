@@ -26,6 +26,16 @@
 #import <mach/mach.h>
 #import "DiCoyProtocol.h"
 
+// IOReturn and kIOReturnSuccess are defined in IOKit/IOReturn.h which is not
+// present in the public iPhoneOS SDK — define the essentials ourselves.
+// IOReturn is typedef int in the real headers; kIOReturnSuccess == KERN_SUCCESS == 0.
+#ifndef IOReturn
+typedef int IOReturn;
+#endif
+#ifndef kIOReturnSuccess
+#define kIOReturnSuccess 0
+#endif
+
 // =========================================================================
 // IOMobileFramebuffer — private framework, loaded via dlopen
 // =========================================================================
