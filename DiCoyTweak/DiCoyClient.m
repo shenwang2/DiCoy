@@ -7,7 +7,7 @@
 
 #import "DiCoyClient.h"
 #import <sys/socket.h>
-#import <sys/un.h>
+#import <netinet/in.h>
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -38,18 +38,19 @@ static os_log_t gClientLog;
 - (BOOL)connect {
     if (_connected) return YES;
 
-    _fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    _fd = socket(AF_INET, SOCK_STREAM, 0);
     if (_fd < 0) {
         os_log_error(gClientLog, "socket(): %s", strerror(errno));
         return NO;
     }
 
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strlcpy(addr.sun_path, DICOY_SOCKET_PATH, sizeof(addr.sun_path));
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(DICOY_SERVER_PORT);
 
     if (connect(_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        os_log_error(gClientLog, "connect(%s): %s", DICOY_SOCKET_PATH, strerror(errno));
+        os_log_error(gClientLog, "connect(127.0.0.1:%d): %s", DICOY_SERVER_PORT, strerror(errno));
         close(_fd);
         _fd = -1;
         return NO;

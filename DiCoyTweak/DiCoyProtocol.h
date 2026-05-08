@@ -14,10 +14,12 @@
 #  define DICOY_JB_PREFIX ""
 #endif
 
-// Socket path – /var/tmp is 1777 (sticky, world-writable), so SpringBoard
-// (running as mobile) can bind here, and sandboxed apps can connect after
-// libSandy applies the DiCoy sandbox-extension profile.
-#define DICOY_SOCKET_PATH "/var/tmp/dicoy.sock"
+// IPC: localhost TCP instead of Unix domain socket.
+// com.apple.app-sandbox.read-write (file extension) does NOT cover the
+// network-outbound syscall that connect() on a Unix socket requires.
+// Every app with com.apple.security.network.client (all networking apps,
+// including Discord) can connect to 127.0.0.1 with no Sandy extension needed.
+#define DICOY_SERVER_PORT 57722
 
 // Preferences plist path – user preferences always live at the real mobile home
 // regardless of jailbreak type; the JB prefix is for JB binaries/libraries only.

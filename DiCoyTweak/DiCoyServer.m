@@ -19,7 +19,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <sys/socket.h>
-#import <sys/un.h>
+#import <netinet/in.h>
 #import <pthread.h>
 #import <unistd.h>
 #import <stdarg.h>
@@ -226,22 +226,23 @@ void diCoyServerStart(void) {
 // =========================================================================
 
 static void * srvSocketServer(void *arg) {
-    unlink(DICOY_SOCKET_PATH);
-
-    int srvFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int srvFd = socket(AF_INET, SOCK_STREAM, 0);
     if (srvFd < 0) { srvLog("FAIL: socket(): %s", strerror(errno)); return NULL; }
 
-    struct sockaddr_un addr = {0};
-    addr.sun_family = AF_UNIX;
-    strlcpy(addr.sun_path, DICOY_SOCKET_PATH, sizeof(addr.sun_path));
+    int yes = 1;
+    setsockopt(srvFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = htons(DICOY_SERVER_PORT);
 
     if (bind(srvFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        srvLog("FAIL: bind(%s): %s", DICOY_SOCKET_PATH, strerror(errno));
+        srvLog("FAIL: bind(127.0.0.1:%d): %s", DICOY_SERVER_PORT, strerror(errno));
         close(srvFd); return NULL;
     }
-    chmod(DICOY_SOCKET_PATH, 0777);
     listen(srvFd, SRV_MAX_CLIENTS);
-    srvLog("Socket listening on %s", DICOY_SOCKET_PATH);
+    srvLog("TCP server listening on 127.0.0.1:%d", DICOY_SERVER_PORT);
 
     while (1) {
         int cfd = accept(srvFd, NULL, NULL);
