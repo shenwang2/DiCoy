@@ -13,7 +13,7 @@ static NSString *const kPrefsPlistPath = @DICOY_PREFS_PATH;
 static NSDictionary *defaultPrefs(void) {
     return @{
         @"mode":          @"off",
-        @"mediaFilePath": @"/var/mobile/Documents/VIDEO.MP4",
+        @"mediaFilePath": @"/var/mobile/Media/DCIM/100APPLE/IMG_0420.MOV",
         @"videoRotation": @"default",
         @"fps":           @"30",
     };
@@ -41,6 +41,9 @@ static NSString *jbEnvironmentString(void) {
     [super layoutSubviews];
     self.textLabel.textColor     = [UIColor systemRedColor];
     self.textLabel.textAlignment = NSTextAlignmentCenter;
+    
+    // Stretch the label to the full width of the cell so centering takes effect
+    self.textLabel.frame = self.contentView.bounds;
 }
 @end
 

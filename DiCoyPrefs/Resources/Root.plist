@@ -47,7 +47,7 @@
             <key>label</key>
             <string>Media Injection</string>
             <key>footerText</key>
-            <string>Absolute path to a .mp4 or .mov file. Drop your video into Files → On My iPhone → (any app folder) or use /var/mobile/Documents/ via Filza.</string>
+            <string>Absolute path to a .mp4 or .mov file in /var/mobile/Media/DCIM/100APPLE/IMG_0420.MOV</string>
         </dict>
 
         <dict>
@@ -58,9 +58,9 @@
             <key>key</key>
             <string>mediaFilePath</string>
             <key>default</key>
-            <string>/var/mobile/Documents/VIDEO.MP4</string>
+            <string>/var/mobile/Media/DCIM/100APPLE/IMG_0420.MOV</string>
             <key>placeholder</key>
-            <string>/var/mobile/Documents/VIDEO.MP4</string>
+            <string>/var/mobile/Media/DCIM/100APPLE/IMG_0420.MOV</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
             <key>keyboardType</key>
@@ -149,6 +149,8 @@
             <string>DiCoy</string>
             <key>id</key>
             <string>versionFooterGroup</string>
+            <key>footerAlignment</key>
+            <integer>1</integer>
         </dict>
 
     </array>
