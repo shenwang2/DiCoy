@@ -1,15 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import "DiCoyProtocol.h"
+#import "DiCoyXPCProtocol.h"
 
-// Called on a private serial queue each time the daemon delivers a new frame.
-// The IOSurfaceRef is valid for the duration of the callback; retain it if
-// you need it beyond that scope.
+// Called on the XPC reply queue each time the server delivers a new frame.
+// The IOSurfaceRef is valid for the duration of the callback; CFRetain it
+// if you need it beyond that scope.
 typedef void (^DiCoyFrameCallback)(IOSurfaceRef surface, uint16_t width, uint16_t height);
 
-// DiCoyClient manages the Unix Domain Socket connection to DiCoyDaemon and
-// dispatches incoming FRAME_READY messages to the registered callback.
-@interface DiCoyClient : NSObject
+// DiCoyClient manages the NSXPCConnection to the SpringBoard-hosted server
+// and dispatches incoming receiveFrame: messages to the registered callback.
+@interface DiCoyClient : NSObject <DiCoyXPCClient>
 
 // Register a block to receive frame notifications. Set before calling -connect.
 @property (nonatomic, copy)     DiCoyFrameCallback frameCallback;
