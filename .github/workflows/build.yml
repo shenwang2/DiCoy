@@ -72,15 +72,13 @@ jobs:
         run: |
           if [[ "${{ matrix.scheme }}" == "rootless" ]]; then
             JB_PREFIX="/var/jb"
-            PLIST_DIR="layout/var/jb/Library/LaunchDaemons"
           else
             JB_PREFIX=""
-            PLIST_DIR="layout/Library/LaunchDaemons"
           fi
-          mkdir -p "$PLIST_DIR"
+          mkdir -p layout/Library/LaunchDaemons
           sed "s|%%JB_PREFIX%%|${JB_PREFIX}|g" \
             DiCoyDaemon/com.dicoy.daemon.plist.in \
-            > "${PLIST_DIR}/com.dicoy.daemon.plist"
+            > layout/Library/LaunchDaemons/com.dicoy.daemon.plist
 
       - name: Build (${{ matrix.label }})
         run: |
