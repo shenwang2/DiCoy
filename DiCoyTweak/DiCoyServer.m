@@ -29,12 +29,16 @@
 // CARenderServerRenderDisplay — merged into QuartzCore on iOS 15+
 // =========================================================================
 
-// On iOS 14+ the second argument changed from CFStringRef to a numeric
-// display UID (uint64_t). UID 0 renders blank; UID 1 is the primary display.
+// Second argument is a CFStringRef display name.
+// Passing NULL returns KERN_SUCCESS but renders blank.
+// Call CARenderServerCopyDisplayList() to discover valid names at runtime.
 typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t  port,
-                                             uint64_t     displayUID,
+                                             CFStringRef  displayName,
                                              IOSurfaceRef surface,
                                              int          flags);
+
+// Returns a CFArray of CFString display names (iOS 13+).
+typedef CFArrayRef (*CARSCopyDisplayList_t)(void);
 
 // =========================================================================
 // NSXPCInterface helper — whitelists IOSurface for receiveFrame:width:height:
@@ -152,6 +156,7 @@ static int srvActiveCount(void) {
 @interface DiCoyCaptureTarget : NSObject
 @property (nonatomic, assign) CARSRenderDisplay_t renderFn;
 @property (nonatomic, assign) int                 failCount;
+@property (nonatomic, strong) NSString           *displayName; // nil → pass NULL to renderFn
 @end
 
 @implementation DiCoyCaptureTarget
@@ -160,29 +165,14 @@ static int srvActiveCount(void) {
     if (srvActiveCount() == 0) return;
     if (!gSurface)             return;
 
-    // Probe display UIDs 1 and 2; UID 0 succeeds but renders blank.
-    // Log which UID works and cache it so we stop probing after the first success.
-    static uint64_t sWorkingUID  = UINT64_MAX; // UINT64_MAX = not yet found
-    static BOOL     sProbedAll   = NO;
-    if (sWorkingUID == UINT64_MAX && !sProbedAll) {
-        for (uint64_t uid = 1; uid <= 4; uid++) {
-            if (self.renderFn(0, uid, gSurface, 0) == KERN_SUCCESS) {
-                sWorkingUID = uid;
-                srvLog("CARenderServerRenderDisplay: display UID %llu works", (unsigned long long)uid);
-                break;
-            }
-        }
-        if (sWorkingUID == UINT64_MAX) {
-            sProbedAll   = YES;
-            sWorkingUID  = 0;   // fall back to UID 0 (blank but non-crashing)
-            srvLog("CARenderServerRenderDisplay: no UID 1-4 worked, using UID 0 (blank)");
-        }
-    }
-    kern_return_t kr = self.renderFn(0, sWorkingUID, gSurface, 0);
+    CFStringRef dname = (__bridge CFStringRef)self.displayName;
+    kern_return_t kr = self.renderFn(0, dname, gSurface, 0);
     if (kr != 0) {
         self.failCount++;
         if (self.failCount % 30 == 1)
-            srvLog("CARenderServerRenderDisplay fail #%d: 0x%x", self.failCount, (unsigned)kr);
+            srvLog("CARenderServerRenderDisplay fail #%d: 0x%x (displayName=%s)",
+                   self.failCount, (unsigned)kr,
+                   self.displayName.UTF8String ?: "NULL");
         return;
     }
 
@@ -194,13 +184,25 @@ static int srvActiveCount(void) {
     static BOOL sFirstFrame = YES;
     if (sFirstFrame) {
         sFirstFrame = NO;
-        // Sample the first pixel to verify the surface has non-zero content.
+        // Sample a grid of pixels to avoid false negative from black screen corners.
         IOSurfaceLock(gSurface, kIOSurfaceLockReadOnly, NULL);
-        uint8_t *px = (uint8_t *)IOSurfaceGetBaseAddress(gSurface);
-        BOOL hasContent = px && (px[0] || px[1] || px[2]);
+        uint8_t *px  = (uint8_t *)IOSurfaceGetBaseAddress(gSurface);
+        size_t   bpr = IOSurfaceGetBytesPerRow(gSurface);
+        BOOL hasContent = NO;
+        if (px) {
+            for (int row = 0; row < (int)gSurfaceH && !hasContent; row += 50) {
+                for (int col = 0; col < (int)gSurfaceW && !hasContent; col += 50) {
+                    uint8_t *p = px + row * bpr + col * 4;
+                    hasContent = p[0] || p[1] || p[2];
+                }
+            }
+        }
         IOSurfaceUnlock(gSurface, kIOSurfaceLockReadOnly, NULL);
-        srvLog("First frame rendered: %ux%u — surface %s",
-               gSurfaceW, gSurfaceH, hasContent ? "HAS CONTENT" : "IS BLACK (check display name)");
+        srvLog("First frame: %ux%u displayName=%s bpr=%zu surface=%s",
+               gSurfaceW, gSurfaceH,
+               self.displayName.UTF8String ?: "NULL",
+               bpr,
+               hasContent ? "HAS CONTENT" : "IS BLACK");
     }
 
     // Snapshot sActive under lock, then iterate outside.
@@ -248,7 +250,6 @@ void diCoyServerStart(void) {
         srvLog("MachXPCListener registered: %s", DICOY_XPC_SERVICE_NAME);
     } else {
         srvLog("MachXPCListener bootstrap_check_in FAILED — screen mirror unavailable");
-        // Continue so display-link setup still logs; startCapture will never fire.
     }
 
     // Display capture setup must run on the main thread.
@@ -257,8 +258,7 @@ void diCoyServerStart(void) {
         // 1. Locate CARenderServerRenderDisplay (merged into QuartzCore on iOS 15+).
         CARSRenderDisplay_t renderFn =
             (CARSRenderDisplay_t)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
-        srvLog("CARenderServerRenderDisplay = %s",
-               renderFn ? "FOUND" : "NOT FOUND");
+        srvLog("CARenderServerRenderDisplay = %s", renderFn ? "FOUND" : "NOT FOUND");
 
         if (!renderFn) {
             srvLog("ABORT: CARenderServerRenderDisplay absent");
@@ -290,12 +290,72 @@ void diCoyServerStart(void) {
 
         gSurfaceW = w;
         gSurfaceH = h;
-        srvLog("IOSurface created: %p %ux%u", (void *)gSurface, w, h);
+        srvLog("IOSurface created: %p %ux%u bpr=%zu",
+               (void *)gSurface, w, h, IOSurfaceGetBytesPerRow(gSurface));
 
-        // 3. Drive frame capture via CADisplayLink.
-        sCaptureTarget           = [DiCoyCaptureTarget new];
-        sCaptureTarget.renderFn  = renderFn;
-        sCaptureTarget.failCount = 0;
+        // 3. Discover the display name for CARenderServerRenderDisplay.
+        //    CARenderServerCopyDisplayList returns a CFArray of valid CFString names.
+        //    If absent, probe known candidate strings and log all results.
+        NSString *displayName = nil;
+        {
+            CARSCopyDisplayList_t copyFn =
+                (CARSCopyDisplayList_t)dlsym(RTLD_DEFAULT, "CARenderServerCopyDisplayList");
+            if (copyFn) {
+                CFArrayRef list = copyFn();
+                if (list) {
+                    CFIndex count = CFArrayGetCount(list);
+                    srvLog("CARenderServerCopyDisplayList: %ld entries", (long)count);
+                    for (CFIndex i = 0; i < count; i++) {
+                        CFStringRef s = (CFStringRef)CFArrayGetValueAtIndex(list, i);
+                        char buf[128] = {0};
+                        CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8);
+                        srvLog("  display[%ld] = '%s'", (long)i, buf);
+                    }
+                    if (count > 0) {
+                        displayName = (__bridge_transfer NSString *)CFRetain(
+                            CFArrayGetValueAtIndex(list, 0));
+                    }
+                    CFRelease(list);
+                } else {
+                    srvLog("CARenderServerCopyDisplayList: returned nil");
+                }
+            } else {
+                srvLog("CARenderServerCopyDisplayList: symbol not found — probing candidates");
+            }
+
+            // If display list didn't give us a name, probe known candidates.
+            // Log every result so we know exactly which names the OS accepts.
+            if (!displayName) {
+                NSArray<NSString*> *candidates = @[
+                    @"LCD", @"lcd", @"CLCD", @"clcd",
+                    @"IDP0", @"ColorLCD", @"", @"built-in"
+                ];
+                for (NSString *name in candidates) {
+                    CFStringRef cfName = (__bridge CFStringRef)name;
+                    kern_return_t kr = renderFn(0, cfName, gSurface, 0);
+                    srvLog("Probe '%s': 0x%x %s",
+                           name.UTF8String, (unsigned)kr,
+                           kr == KERN_SUCCESS ? "(KERN_SUCCESS)" : "(KERN_FAILURE)");
+                    if (kr == KERN_SUCCESS && !displayName) {
+                        displayName = name;
+                    }
+                }
+                // Always probe NULL to see its return code too.
+                kern_return_t krNull = renderFn(0, NULL, gSurface, 0);
+                srvLog("Probe NULL: 0x%x %s",
+                       (unsigned)krNull,
+                       krNull == KERN_SUCCESS ? "(KERN_SUCCESS)" : "(KERN_FAILURE)");
+            }
+
+            srvLog("Selected displayName: %s",
+                   displayName.UTF8String ?: "NULL (may render blank)");
+        }
+
+        // 4. Drive frame capture via CADisplayLink.
+        sCaptureTarget             = [DiCoyCaptureTarget new];
+        sCaptureTarget.renderFn    = renderFn;
+        sCaptureTarget.failCount   = 0;
+        sCaptureTarget.displayName = displayName;
 
         sDisplayLink = [CADisplayLink displayLinkWithTarget:sCaptureTarget
                                                    selector:@selector(tick:)];
