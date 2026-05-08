@@ -2,76 +2,68 @@
 //
 // Screen-capture server running inside SpringBoard via tweak injection.
 //
-// Socket: /var/tmp/dicoy.sock — sticky 1777 so mobile (SpringBoard) can bind
-// and sandboxed apps can connect after libSandy applies the DiCoy profile.
+// IOMobileFramebufferGetLayerDefaultSurface returns kIOReturnError on A13+ DCP
+// devices (the display compositor runs on a separate co-processor and this
+// legacy API is a no-op stub). We use CARenderServerRenderDisplay instead.
 //
-// IOMobileFramebufferGetLayerDefaultSurface may return kIOReturnError during
-// early SpringBoard startup (display not yet fully initialized). The capture
-// loop never exits — it retries and logs every 30 failures so the log shows
-// whether/when the surface becomes available.
+// CARenderServer.framework no longer exists as a file on iOS 15+, but its
+// symbols were merged into QuartzCore.framework (which is always loaded in
+// every process). dlsym(RTLD_DEFAULT, ...) finds the symbol without dlopen.
+//
+// The destination IOSurface is created with IOSurfaceIsGlobal so camera-app
+// processes can call IOSurfaceLookup(id) after libSandy grants
+// IOSurfaceRootUserClient access.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <sys/socket.h>
 #import <sys/un.h>
-#import <sys/stat.h>
 #import <pthread.h>
 #import <unistd.h>
 #import <stdarg.h>
 #import <os/log.h>
 #import <dlfcn.h>
-#import <mach/mach.h>
 #import "DiCoyProtocol.h"
 
-// IOReturn / kIOReturnSuccess are in IOKit/IOReturn.h which is absent from the
-// public iPhoneOS SDK. Define the minimum we need here.
-#ifndef IOReturn
-typedef int IOReturn;
-#endif
-#ifndef kIOReturnSuccess
-#define kIOReturnSuccess 0
-#endif
-
 // =========================================================================
-// IOMobileFramebuffer — private framework, loaded via dlopen
+// CARenderServerRenderDisplay — in QuartzCore on iOS 15+
+//
+// Signature from reverse engineering of QuartzCore on iOS 13–15:
+//   port    : mach_port_t — pass 0 (use the default render-server port)
+//   display : CFStringRef — pass NULL (primary display)
+//   surface : IOSurfaceRef — destination; must be pre-allocated
+//   flags   : int         — pass 0
+// Returns 0 (KERN_SUCCESS) on success.
 // =========================================================================
 
-typedef struct __IOMobileFramebuffer *IOMobileFramebufferRef;
-
-typedef IOReturn (*IOMFBOpen_t)(uint32_t               service,
-                                task_port_t            task,
-                                uint32_t               type,
-                                IOMobileFramebufferRef *out);
-
-typedef IOReturn (*IOMFBGetSurface_t)(IOMobileFramebufferRef fb,
-                                      int                    layer,
-                                      IOSurfaceRef          *outSurface);
-
-// IOKit — forward-declare to avoid IOKitLib.h availability issues.
-extern uint32_t              IOServiceGetMatchingService(uint32_t masterPort, CFDictionaryRef matching) __attribute__((weak));
-extern CFMutableDictionaryRef IOServiceMatching(const char *name)                                       __attribute__((weak));
-extern kern_return_t          IOObjectRelease(uint32_t object)                                          __attribute__((weak));
-extern uint32_t               kIOMasterPortDefault                                                       __attribute__((weak));
+typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t    port,
+                                             CFStringRef    display,
+                                             IOSurfaceRef   surface,
+                                             int            flags);
 
 // =========================================================================
-// Constants
+// Constants / globals
 // =========================================================================
 
 #define SRV_MAX_CLIENTS 8
 
-// =========================================================================
-// Module-private globals
-// =========================================================================
-
-static os_log_t        sSrvLog;
+static os_log_t         sSrvLog;
 typedef struct { int fd; BOOL active; } SrvClient;
-static SrvClient       sClients[SRV_MAX_CLIENTS];
-static int             sActiveCount = 0;
-static pthread_mutex_t sClientsMtx  = PTHREAD_MUTEX_INITIALIZER;
+static SrvClient        sClients[SRV_MAX_CLIENTS];
+static int              sActiveCount = 0;
+static pthread_mutex_t  sClientsMtx  = PTHREAD_MUTEX_INITIALIZER;
+
+// The one surface we render the screen into each frame (created on main thread
+// at startup; read-only from socket-server/broadcast thereafter).
+static IOSurfaceRef     gSurface    = NULL;
+static uint32_t         gSurfaceID  = 0;
+static uint16_t         gSurfaceW   = 0;
+static uint16_t         gSurfaceH   = 0;
 
 // =========================================================================
-// Diagnostic file writer — /var/tmp/dicoy_server.txt
+// Diagnostic writer — /var/tmp/dicoy_server.txt
 // =========================================================================
 
 static void srvLog(const char *fmt, ...) {
@@ -84,19 +76,62 @@ static void srvLog(const char *fmt, ...) {
 }
 
 // =========================================================================
-// Forward declarations
+// Helpers
 // =========================================================================
 
-static void * srvCaptureLoop(void *arg);
-static void * srvSocketServer(void *arg);
-static void * srvHandleClient(void *arg);
 static void   srvBroadcast(uint32_t surfID, uint16_t w, uint16_t h);
 static void   srvRemoveClient(int fd);
 static int    srvActiveCount(void);
 
+static void * srvSocketServer(void *arg);
+static void * srvHandleClient(void *arg);
+
 // =========================================================================
-// Public entry point — called once from %ctor when in SpringBoard
+// CADisplayLink target — lives on the main thread
 // =========================================================================
+
+@interface DiCoyCaptureTarget : NSObject
+@property (nonatomic, assign) CARSRenderDisplay_t renderFn;
+@property (nonatomic, assign) int                 failCount;
+@end
+
+@implementation DiCoyCaptureTarget
+
+- (void)tick:(CADisplayLink *)link {
+    if (srvActiveCount() == 0) return;
+    if (!gSurface)             return;
+
+    kern_return_t kr = self.renderFn(0, NULL, gSurface, 0);
+    if (kr != 0) {
+        self.failCount++;
+        if (self.failCount % 30 == 1)
+            srvLog("CARenderServerRenderDisplay fail #%d: 0x%x", self.failCount, (unsigned)kr);
+        return;
+    }
+
+    if (self.failCount > 0) {
+        srvLog("CARenderServerRenderDisplay recovered after %d failures", self.failCount);
+        self.failCount = 0;
+    }
+
+    static BOOL sFirstFrame = YES;
+    if (sFirstFrame) {
+        sFirstFrame = NO;
+        srvLog("First frame rendered: id=%u %ux%u", gSurfaceID, gSurfaceW, gSurfaceH);
+    }
+
+    srvBroadcast(gSurfaceID, gSurfaceW, gSurfaceH);
+}
+
+@end
+
+// =========================================================================
+// Public entry point
+// =========================================================================
+
+// Retained on main thread for the display link lifetime.
+static DiCoyCaptureTarget *sCaptureTarget;
+static CADisplayLink      *sDisplayLink;
 
 void diCoyServerStart(void) {
     sSrvLog = os_log_create("com.dicoy.server", "springboard");
@@ -105,133 +140,84 @@ void diCoyServerStart(void) {
     FILE *f = fopen("/var/tmp/dicoy_server.txt", "w");
     if (f) { fprintf(f, "DiCoyServer start PID=%d\n", getpid()); fclose(f); }
 
+    // Socket server runs on a background thread.
     pthread_t t;
     pthread_create(&t, NULL, srvSocketServer, NULL);
     pthread_detach(t);
-    pthread_create(&t, NULL, srvCaptureLoop, NULL);
-    pthread_detach(t);
-}
 
-// =========================================================================
-// Capture loop — IOMobileFramebuffer inside SpringBoard
-//
-// IOMobileFramebufferOpen requires the UI bootstrap session and
-// com.apple.private.framebuffer — both true for SpringBoard.
-//
-// GetLayerDefaultSurface may return kIOReturnError early in boot before the
-// display has rendered its first frame. We never exit on failure; instead we
-// log every 30th consecutive failure and keep retrying.
-// =========================================================================
+    // Display capture must be set up on the main thread (display-server APIs,
+    // UIScreen, and CADisplayLink all require it).
+    dispatch_async(dispatch_get_main_queue(), ^{
 
-static void * srvCaptureLoop(void *arg) {
-    void *lib = dlopen(
-        "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
-        RTLD_LAZY | RTLD_GLOBAL);
-    if (!lib) {
-        srvLog("FAIL: dlopen IOMobileFramebuffer: %s", dlerror());
-        return NULL;
-    }
-    srvLog("IOMobileFramebuffer.framework loaded");
+        // ---------------------------------------------------------------
+        // 1. Locate CARenderServerRenderDisplay in the loaded QuartzCore.
+        // ---------------------------------------------------------------
+        CARSRenderDisplay_t renderFn =
+            (CARSRenderDisplay_t)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
+        srvLog("CARenderServerRenderDisplay = %s",
+               renderFn ? "FOUND in QuartzCore" : "NOT FOUND");
 
-    IOMFBOpen_t       fbOpen       = (IOMFBOpen_t)dlsym(lib, "IOMobileFramebufferOpen");
-    IOMFBGetSurface_t fbGetSurface = (IOMFBGetSurface_t)dlsym(lib,
-                                         "IOMobileFramebufferGetLayerDefaultSurface");
-    if (!fbOpen || !fbGetSurface) {
-        srvLog("FAIL: IOMobileFramebuffer symbols missing: open=%p surf=%p err=%s",
-               (void *)fbOpen, (void *)fbGetSurface, dlerror());
-        return NULL;
-    }
-    srvLog("IOMobileFramebuffer symbols resolved");
-
-    uint32_t svc = IOServiceGetMatchingService
-        ? IOServiceGetMatchingService(kIOMasterPortDefault,
-                                      IOServiceMatching("IOMobileFramebuffer"))
-        : 0;
-    if (!svc) {
-        srvLog("FAIL: IOMobileFramebuffer IOService not found");
-        return NULL;
-    }
-    srvLog("IOService=0x%x", svc);
-
-    IOMobileFramebufferRef fb = NULL;
-    IOReturn openRet = fbOpen(svc, mach_task_self(), 0, &fb);
-    if (IOObjectRelease) IOObjectRelease(svc);
-
-    if (openRet != kIOReturnSuccess || !fb) {
-        srvLog("FAIL: IOMobileFramebufferOpen: 0x%x", (unsigned)openRet);
-        return NULL;
-    }
-    srvLog("IOMobileFramebuffer opened (type=0)");
-
-    // -----------------------------------------------------------------------
-    // Main capture loop.
-    //
-    // GetLayerDefaultSurface is retried every iteration without early exit:
-    // it fails during SpringBoard init and (hopefully) succeeds once the
-    // display pipeline is fully up. We log every 30th consecutive failure so
-    // the log file shows progress without flooding.
-    //
-    // Layer probing: try 0, then 1, then 2 in sequence if 0 keeps failing.
-    // -----------------------------------------------------------------------
-    const uint64_t frameIntervalNs = (uint64_t)(1e9 / DICOY_TARGET_FPS);
-    uint64_t lastFrameNs   = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    BOOL     firstFrame    = YES;
-    int      surfFailCount = 0;
-    int      probeLayer    = 0;   // escalate to 1, 2 after many failures on 0
-
-    while (1) {
-        if (srvActiveCount() == 0) { usleep(100000); continue; }
-
-        uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-        int64_t remaining = (int64_t)frameIntervalNs - (int64_t)(now - lastFrameNs);
-        if (remaining > 0) { usleep((useconds_t)(remaining / 2000)); continue; }
-        lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-
-        IOSurfaceRef surface = NULL;
-        IOReturn r = fbGetSurface(fb, probeLayer, &surface);
-
-        if (r != kIOReturnSuccess || !surface) {
-            surfFailCount++;
-            // After 150 failures on layer 0 (~5 s), escalate to layer 1
-            if (surfFailCount == 150 && probeLayer == 0) {
-                probeLayer = 1;
-                srvLog("GetLayerDefaultSurface layer=0 failed %d times (0x%x), trying layer=1",
-                       surfFailCount, (unsigned)r);
-            }
-            // After another 150 failures on layer 1, try layer 2
-            if (surfFailCount == 300 && probeLayer == 1) {
-                probeLayer = 2;
-                srvLog("GetLayerDefaultSurface layer=1 still failing, trying layer=2");
-            }
-            // Log every 30th failure regardless
-            if (surfFailCount % 30 == 1) {
-                srvLog("GetLayerDefaultSurface layer=%d fail #%d: 0x%x",
-                       probeLayer, surfFailCount, (unsigned)r);
-            }
-            continue;
+        if (!renderFn) {
+            srvLog("ABORT: CARenderServerRenderDisplay absent — screen mirror unavailable");
+            return;
         }
 
-        // Surface obtained — reset failure counter and layer probe
-        if (surfFailCount > 0) {
-            srvLog("GetLayerDefaultSurface recovered after %d failures (layer=%d)",
-                   surfFailCount, probeLayer);
-            surfFailCount = 0;
+        // ---------------------------------------------------------------
+        // 2. Create the global destination IOSurface.
+        //    SpringBoard is an Apple-signed privileged process in the UI
+        //    session, so IOSurfaceIsGlobal is honored here (it fails in
+        //    Background-session daemons).
+        // ---------------------------------------------------------------
+        CGRect native = [UIScreen mainScreen].nativeBounds;
+        uint16_t w = (uint16_t)native.size.width;
+        uint16_t h = (uint16_t)native.size.height;
+        srvLog("Display native bounds: %ux%u", w, h);
+
+        // Use string literal for IOSurfaceIsGlobal to avoid the deprecated
+        // kIOSurfaceIsGlobal symbol (same string value, no warning).
+        CFMutableDictionaryRef props = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(props, kIOSurfaceWidth,           (__bridge CFNumberRef)@(w));
+        CFDictionarySetValue(props, kIOSurfaceHeight,          (__bridge CFNumberRef)@(h));
+        CFDictionarySetValue(props, kIOSurfacePixelFormat,     (__bridge CFNumberRef)@(0x42475241)); // 'BGRA'
+        CFDictionarySetValue(props, kIOSurfaceBytesPerElement, (__bridge CFNumberRef)@(4));
+        CFDictionarySetValue(props, CFSTR("IOSurfaceIsGlobal"), kCFBooleanTrue);
+
+        gSurface = IOSurfaceCreate(props);
+        CFRelease(props);
+
+        srvLog("IOSurfaceCreate(global) %ux%u = %p id=%u",
+               w, h, (void *)gSurface,
+               gSurface ? IOSurfaceGetID(gSurface) : 0);
+
+        if (!gSurface) {
+            srvLog("ABORT: IOSurfaceCreate failed — SpringBoard may lack entitlement");
+            return;
         }
 
-        uint32_t sid = IOSurfaceGetID(surface);
-        uint16_t w   = (uint16_t)IOSurfaceGetWidth(surface);
-        uint16_t h   = (uint16_t)IOSurfaceGetHeight(surface);
-        // surface is owned by the display hardware — do NOT CFRelease
+        gSurfaceID = IOSurfaceGetID(gSurface);
+        gSurfaceW  = w;
+        gSurfaceH  = h;
 
-        if (firstFrame) {
-            firstFrame = NO;
-            srvLog("First frame: id=%u %ux%u fmt=0x%08x layer=%d",
-                   sid, w, h, IOSurfaceGetPixelFormat(surface), probeLayer);
-        }
-        srvBroadcast(sid, w, h);
-    }
+        // ---------------------------------------------------------------
+        // 3. Start a CADisplayLink to drive frame capture at DICOY_TARGET_FPS.
+        // ---------------------------------------------------------------
+        sCaptureTarget           = [DiCoyCaptureTarget new];
+        sCaptureTarget.renderFn  = renderFn;
+        sCaptureTarget.failCount = 0;
 
-    return NULL;
+        sDisplayLink = [CADisplayLink
+            displayLinkWithTarget:sCaptureTarget
+                         selector:@selector(tick:)];
+        sDisplayLink.preferredFramesPerSecond = DICOY_TARGET_FPS;
+        [sDisplayLink addToRunLoop:[NSRunLoop mainRunLoop]
+                           forMode:NSRunLoopCommonModes];
+
+        srvLog("CADisplayLink started at %d fps, surface id=%u",
+               DICOY_TARGET_FPS, gSurfaceID);
+    });
 }
 
 // =========================================================================
@@ -272,7 +258,9 @@ static void * srvSocketServer(void *arg) {
 
         srvLog("Client connected fd=%d", cfd);
         int *fdp = malloc(sizeof(int)); *fdp = cfd;
-        pthread_t t; pthread_create(&t, NULL, srvHandleClient, fdp); pthread_detach(t);
+        pthread_t t;
+        pthread_create(&t, NULL, srvHandleClient, fdp);
+        pthread_detach(t);
     }
     return NULL;
 }
@@ -319,9 +307,12 @@ static void * srvHandleClient(void *arg) {
 
 static void srvBroadcast(uint32_t surfID, uint16_t w, uint16_t h) {
     DicoyMessage msg = {
-        .magic = DICOY_MAGIC, .type = kDicoyMsgFrameReady,
-        .surface_id = surfID, .width = w, .height = h,
-        .timestamp = (uint32_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL),
+        .magic      = DICOY_MAGIC,
+        .type       = kDicoyMsgFrameReady,
+        .surface_id = surfID,
+        .width      = w,
+        .height     = h,
+        .timestamp  = (uint32_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL),
     };
     pthread_mutex_lock(&sClientsMtx);
     for (int i = 0; i < SRV_MAX_CLIENTS; i++)
