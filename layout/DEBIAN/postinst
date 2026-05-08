@@ -20,7 +20,7 @@ echo "JB prefix: $P"
 SANDY_DIR="${P}/Library/libSandy"
 mkdir -p "$SANDY_DIR"
 
-cat > "${SANDY_DIR}/DiCoy.plist" <<PLISTEOF
+cat > "${SANDY_DIR}/DiCoy.plist" <<'PLISTEOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,7 +37,7 @@ cat > "${SANDY_DIR}/DiCoy.plist" <<PLISTEOF
 			<key>extension_class</key>
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
-			<string>${P}/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
+			<string>/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
 		</dict>
 		<dict>
 			<key>type</key>
@@ -45,7 +45,31 @@ cat > "${SANDY_DIR}/DiCoy.plist" <<PLISTEOF
 			<key>extension_class</key>
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
-			<string>${P}/var/run/dicoy.sock</string>
+			<string>/var/tmp/dicoy.sock</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_mode.txt</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_surf.txt</string>
+		</dict>
+		<dict>
+			<key>type</key>
+			<string>file</string>
+			<key>extension_class</key>
+			<string>com.apple.app-sandbox.read-write</string>
+			<key>path</key>
+			<string>/var/tmp/dicoy_debug.txt</string>
 		</dict>
 		<dict>
 			<key>type</key>
