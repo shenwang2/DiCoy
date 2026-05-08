@@ -58,3 +58,18 @@ PLISTEOF
 
 chown root:wheel "${SANDY_DIR}/DiCoy.plist"
 chmod 644 "${SANDY_DIR}/DiCoy.plist"
+
+# Register and start the daemon with launchd.
+# Use the jailbreak-prefixed launchctl for rootless; fall back to system launchctl.
+LAUNCHCTL="${P}/usr/bin/launchctl"
+if [ ! -x "$LAUNCHCTL" ]; then
+    LAUNCHCTL="launchctl"
+fi
+LAUNCHD="${P}/Library/LaunchDaemons/com.dicoy.daemon.plist"
+if [ -f "$LAUNCHD" ]; then
+    # bootout removes any previous instance; bootstrap registers and starts the new one.
+    # Errors are suppressed so a fresh install (nothing to bootout) doesn't fail.
+    "$LAUNCHCTL" bootout system "$LAUNCHD" 2>/dev/null || true
+    "$LAUNCHCTL" bootstrap system "$LAUNCHD" 2>/dev/null || \
+    "$LAUNCHCTL" load "$LAUNCHD" 2>/dev/null || true
+fi
