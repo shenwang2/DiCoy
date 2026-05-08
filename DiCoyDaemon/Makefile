@@ -28,6 +28,12 @@ else
   JB_PREFIX           =
 endif
 
+internal-stage::
+	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)/Library/LaunchDaemons$(ECHO_END)
+	$(ECHO_NOTHING)sed 's|%%JB_PREFIX%%|$(JB_PREFIX)|g' \
+	    $(THEOS_PROJECT_DIR)/com.dicoy.daemon.plist.in \
+	    > $(THEOS_STAGING_DIR)/Library/LaunchDaemons/com.dicoy.daemon.plist$(ECHO_END)
+
 # Re-load the daemon on the device after SSH install.
 after-install::
 	install.exec "launchctl unload $(JB_PREFIX)/Library/LaunchDaemons/com.dicoy.daemon.plist 2>/dev/null; true"
