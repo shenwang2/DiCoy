@@ -14,9 +14,10 @@
 #  define DICOY_JB_PREFIX ""
 #endif
 
-// Socket path – placed in the globally-accessible rootless prefix so that
-// sandboxed app processes can connect without special entitlements.
-#define DICOY_SOCKET_PATH DICOY_JB_PREFIX "/var/run/dicoy.sock"
+// Socket path – /var/tmp is 1777 (sticky, world-writable), so SpringBoard
+// (running as mobile) can bind here, and sandboxed apps can connect after
+// libSandy applies the DiCoy sandbox-extension profile.
+#define DICOY_SOCKET_PATH "/var/tmp/dicoy.sock"
 
 // Preferences plist path – used by DiCoyTweak to read the current mode and by
 // DiCoyPrefs to write it. libSandy (applied in %ctor) grants the injected process

@@ -2,15 +2,13 @@
 //
 // Screen-capture server running inside SpringBoard via tweak injection.
 //
-// CARenderServer.framework does not exist on disk on iOS 15+ and is not in the
-// dyld shared cache — dlopen fails.  IOMobileFramebuffer is the correct path:
-// the framework exists, the symbols resolve, and IOMobileFramebufferOpen
-// succeeds because SpringBoard is in the UI session (kIOReturnNotPermitted was
-// only seen from the Background-session standalone daemon).
+// Socket: /var/tmp/dicoy.sock — sticky 1777 so mobile (SpringBoard) can bind
+// and sandboxed apps can connect after libSandy applies the DiCoy profile.
 //
-// The display's own IOSurface is in the global IOSurface table by system
-// necessity, so IOSurfaceLookup() in camera-app processes works without
-// kIOSurfaceIsGlobal.
+// IOMobileFramebufferGetLayerDefaultSurface may return kIOReturnError during
+// early SpringBoard startup (display not yet fully initialized). The capture
+// loop never exits — it retries and logs every 30 failures so the log shows
+// whether/when the surface becomes available.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -26,9 +24,8 @@
 #import <mach/mach.h>
 #import "DiCoyProtocol.h"
 
-// IOReturn and kIOReturnSuccess are defined in IOKit/IOReturn.h which is not
-// present in the public iPhoneOS SDK — define the essentials ourselves.
-// IOReturn is typedef int in the real headers; kIOReturnSuccess == KERN_SUCCESS == 0.
+// IOReturn / kIOReturnSuccess are in IOKit/IOReturn.h which is absent from the
+// public iPhoneOS SDK. Define the minimum we need here.
 #ifndef IOReturn
 typedef int IOReturn;
 #endif
@@ -42,20 +39,20 @@ typedef int IOReturn;
 
 typedef struct __IOMobileFramebuffer *IOMobileFramebufferRef;
 
-typedef IOReturn (*IOMFBOpen_t)(uint32_t              service,
-                                 task_port_t           task,
-                                 uint32_t              type,
-                                 IOMobileFramebufferRef *out);
+typedef IOReturn (*IOMFBOpen_t)(uint32_t               service,
+                                task_port_t            task,
+                                uint32_t               type,
+                                IOMobileFramebufferRef *out);
 
 typedef IOReturn (*IOMFBGetSurface_t)(IOMobileFramebufferRef fb,
-                                       int                    layer,
-                                       IOSurfaceRef          *outSurface);
+                                      int                    layer,
+                                      IOSurfaceRef          *outSurface);
 
 // IOKit — forward-declare to avoid IOKitLib.h availability issues.
-extern uint32_t IOServiceGetMatchingService(uint32_t masterPort, CFDictionaryRef matching) __attribute__((weak));
-extern CFMutableDictionaryRef IOServiceMatching(const char *name) __attribute__((weak));
-extern kern_return_t IOObjectRelease(uint32_t object) __attribute__((weak));
-extern uint32_t kIOMasterPortDefault __attribute__((weak));
+extern uint32_t              IOServiceGetMatchingService(uint32_t masterPort, CFDictionaryRef matching) __attribute__((weak));
+extern CFMutableDictionaryRef IOServiceMatching(const char *name)                                       __attribute__((weak));
+extern kern_return_t          IOObjectRelease(uint32_t object)                                          __attribute__((weak));
+extern uint32_t               kIOMasterPortDefault                                                       __attribute__((weak));
 
 // =========================================================================
 // Constants
@@ -104,7 +101,6 @@ static int    srvActiveCount(void);
 void diCoyServerStart(void) {
     sSrvLog = os_log_create("com.dicoy.server", "springboard");
     for (int i = 0; i < SRV_MAX_CLIENTS; i++) sClients[i].fd = -1;
-    mkdir(DICOY_JB_PREFIX "/var/run", 0755);
 
     FILE *f = fopen("/var/tmp/dicoy_server.txt", "w");
     if (f) { fprintf(f, "DiCoyServer start PID=%d\n", getpid()); fclose(f); }
@@ -119,10 +115,12 @@ void diCoyServerStart(void) {
 // =========================================================================
 // Capture loop — IOMobileFramebuffer inside SpringBoard
 //
-// IOMobileFramebufferOpen requires being in the UI bootstrap session and
-// having com.apple.private.framebuffer — both are true for SpringBoard.
-// The standalone daemon in the Background session got kIOReturnNotPermitted;
-// SpringBoard does not.
+// IOMobileFramebufferOpen requires the UI bootstrap session and
+// com.apple.private.framebuffer — both true for SpringBoard.
+//
+// GetLayerDefaultSurface may return kIOReturnError early in boot before the
+// display has rendered its first frame. We never exit on failure; instead we
+// log every 30th consecutive failure and keep retrying.
 // =========================================================================
 
 static void * srvCaptureLoop(void *arg) {
@@ -135,11 +133,12 @@ static void * srvCaptureLoop(void *arg) {
     }
     srvLog("IOMobileFramebuffer.framework loaded");
 
-    IOMFBOpen_t     fbOpen       = (IOMFBOpen_t)dlsym(lib, "IOMobileFramebufferOpen");
+    IOMFBOpen_t       fbOpen       = (IOMFBOpen_t)dlsym(lib, "IOMobileFramebufferOpen");
     IOMFBGetSurface_t fbGetSurface = (IOMFBGetSurface_t)dlsym(lib,
                                          "IOMobileFramebufferGetLayerDefaultSurface");
     if (!fbOpen || !fbGetSurface) {
-        srvLog("FAIL: IOMobileFramebuffer symbols missing: %s", dlerror());
+        srvLog("FAIL: IOMobileFramebuffer symbols missing: open=%p surf=%p err=%s",
+               (void *)fbOpen, (void *)fbGetSurface, dlerror());
         return NULL;
     }
     srvLog("IOMobileFramebuffer symbols resolved");
@@ -162,25 +161,23 @@ static void * srvCaptureLoop(void *arg) {
         srvLog("FAIL: IOMobileFramebufferOpen: 0x%x", (unsigned)openRet);
         return NULL;
     }
-    srvLog("IOMobileFramebuffer opened");
+    srvLog("IOMobileFramebuffer opened (type=0)");
 
-    // Probe the initial surface to log dimensions and confirm it's accessible.
-    {
-        IOSurfaceRef s = NULL;
-        IOReturn r = fbGetSurface(fb, 0, &s);
-        if (r == kIOReturnSuccess && s) {
-            srvLog("Display surface: %zux%zu fmt=0x%08x id=%u",
-                   IOSurfaceGetWidth(s), IOSurfaceGetHeight(s),
-                   IOSurfaceGetPixelFormat(s), IOSurfaceGetID(s));
-        } else {
-            srvLog("FAIL: initial GetLayerDefaultSurface: 0x%x", (unsigned)r);
-            return NULL;
-        }
-    }
-
+    // -----------------------------------------------------------------------
+    // Main capture loop.
+    //
+    // GetLayerDefaultSurface is retried every iteration without early exit:
+    // it fails during SpringBoard init and (hopefully) succeeds once the
+    // display pipeline is fully up. We log every 30th consecutive failure so
+    // the log file shows progress without flooding.
+    //
+    // Layer probing: try 0, then 1, then 2 in sequence if 0 keeps failing.
+    // -----------------------------------------------------------------------
     const uint64_t frameIntervalNs = (uint64_t)(1e9 / DICOY_TARGET_FPS);
-    uint64_t lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    BOOL firstFrame = YES;
+    uint64_t lastFrameNs   = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    BOOL     firstFrame    = YES;
+    int      surfFailCount = 0;
+    int      probeLayer    = 0;   // escalate to 1, 2 after many failures on 0
 
     while (1) {
         if (srvActiveCount() == 0) { usleep(100000); continue; }
@@ -191,7 +188,35 @@ static void * srvCaptureLoop(void *arg) {
         lastFrameNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
 
         IOSurfaceRef surface = NULL;
-        if (fbGetSurface(fb, 0, &surface) != kIOReturnSuccess || !surface) continue;
+        IOReturn r = fbGetSurface(fb, probeLayer, &surface);
+
+        if (r != kIOReturnSuccess || !surface) {
+            surfFailCount++;
+            // After 150 failures on layer 0 (~5 s), escalate to layer 1
+            if (surfFailCount == 150 && probeLayer == 0) {
+                probeLayer = 1;
+                srvLog("GetLayerDefaultSurface layer=0 failed %d times (0x%x), trying layer=1",
+                       surfFailCount, (unsigned)r);
+            }
+            // After another 150 failures on layer 1, try layer 2
+            if (surfFailCount == 300 && probeLayer == 1) {
+                probeLayer = 2;
+                srvLog("GetLayerDefaultSurface layer=1 still failing, trying layer=2");
+            }
+            // Log every 30th failure regardless
+            if (surfFailCount % 30 == 1) {
+                srvLog("GetLayerDefaultSurface layer=%d fail #%d: 0x%x",
+                       probeLayer, surfFailCount, (unsigned)r);
+            }
+            continue;
+        }
+
+        // Surface obtained — reset failure counter and layer probe
+        if (surfFailCount > 0) {
+            srvLog("GetLayerDefaultSurface recovered after %d failures (layer=%d)",
+                   surfFailCount, probeLayer);
+            surfFailCount = 0;
+        }
 
         uint32_t sid = IOSurfaceGetID(surface);
         uint16_t w   = (uint16_t)IOSurfaceGetWidth(surface);
@@ -200,7 +225,8 @@ static void * srvCaptureLoop(void *arg) {
 
         if (firstFrame) {
             firstFrame = NO;
-            srvLog("First frame: id=%u %dx%d", sid, w, h);
+            srvLog("First frame: id=%u %ux%u fmt=0x%08x layer=%d",
+                   sid, w, h, IOSurfaceGetPixelFormat(surface), probeLayer);
         }
         srvBroadcast(sid, w, h);
     }
