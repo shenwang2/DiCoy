@@ -47,7 +47,7 @@
             <key>label</key>
             <string>Media Injection</string>
             <key>footerText</key>
-            <string>Absolute path to a .mp4, .mov, or image file on the device. The file is read directly from disk; no import needed.</string>
+            <string>Absolute path to a .mp4 or .mov file. Drop your video into Files → On My iPhone → (any app folder) or use /var/mobile/Documents/ via Filza.</string>
         </dict>
 
         <dict>
@@ -58,9 +58,9 @@
             <key>key</key>
             <string>mediaFilePath</string>
             <key>default</key>
-            <string></string>
+            <string>/var/mobile/Documents/VIDEO.MP4</string>
             <key>placeholder</key>
-            <string>/var/mobile/Media/DCIM/inject.mp4</string>
+            <string>/var/mobile/Documents/VIDEO.MP4</string>
             <key>defaults</key>
             <string>com.dicoy.prefs</string>
             <key>keyboardType</key>
@@ -124,6 +124,31 @@
                 <string>30 FPS</string>
                 <string>60 FPS</string>
             </array>
+        </dict>
+
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>
+            <string>PSButtonCell</string>
+            <key>label</key>
+            <string>Reset to Defaults</string>
+            <key>action</key>
+            <string>_resetButtonTapped</string>
+            <key>cellClass</key>
+            <string>DiCoyResetCell</string>
+        </dict>
+
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>DiCoy</string>
+            <key>id</key>
+            <string>versionFooterGroup</string>
         </dict>
 
     </array>
