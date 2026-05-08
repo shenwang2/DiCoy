@@ -26,7 +26,7 @@ endif
 internal-stage::
 	$(ECHO_NOTHING)mkdir -p $(THEOS_STAGING_DIR)/Library/libSandy$(ECHO_END)
 	$(ECHO_NOTHING)sed 's|%%JB_PREFIX%%|$(JB_PREFIX)|g' \
-	    $(THEOS_PROJECT_DIR)/libSandy.plist.in \
+	    $(THEOS_PROJECT_DIR)/DiCoyTweak/libSandy.plist.in \
 	    > $(THEOS_STAGING_DIR)/Library/libSandy/DiCoy.plist$(ECHO_END)
 
 include $(THEOS)/makefiles/tweak.mk
