@@ -22,24 +22,11 @@ DiCoyDaemon_CODESIGN_FLAGS = -Sentitlements.plist
 DiCoyDaemon_INSTALL_PATH = /usr/sbin
 
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-  JB_PREFIX             = /var/jb
-  _LAUNCHDAEMONS_LAYOUT = var/jb/Library/LaunchDaemons
-  DiCoyDaemon_CFLAGS   += -DDICOY_ROOTLESS=1
+  JB_PREFIX           = /var/jb
+  DiCoyDaemon_CFLAGS += -DDICOY_ROOTLESS=1
 else
-  JB_PREFIX             =
-  _LAUNCHDAEMONS_LAYOUT = Library/LaunchDaemons
+  JB_PREFIX           =
 endif
-
-# --------------------------------------------------------------------------
-# Generate com.dicoy.daemon.plist from the .in template before packaging
-# so the binary path inside the plist matches the actual install prefix.
-# The generated file is staged into layout/ which Theos includes in the .deb.
-# --------------------------------------------------------------------------
-before-package::
-	mkdir -p $(THEOS_PROJECT_DIR)/layout/$(_LAUNCHDAEMONS_LAYOUT)
-	sed 's|%%JB_PREFIX%%|$(JB_PREFIX)|g' \
-	    $(THEOS_PROJECT_DIR)/com.dicoy.daemon.plist.in \
-	    > $(THEOS_PROJECT_DIR)/layout/$(_LAUNCHDAEMONS_LAYOUT)/com.dicoy.daemon.plist
 
 # Re-load the daemon on the device after SSH install.
 after-install::
