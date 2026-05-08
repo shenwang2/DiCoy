@@ -2,41 +2,31 @@
 //
 // Screen-capture server running inside SpringBoard via tweak injection.
 //
-// IOMobileFramebufferGetLayerDefaultSurface returns kIOReturnError on A13+ DCP
-// devices (the display compositor runs on a separate co-processor and this
-// legacy API is a no-op stub). We use CARenderServerRenderDisplay instead.
+// CARenderServerRenderDisplay renders the primary display into a local IOSurface
+// each frame. The surface is delivered to clients as an ObjC object over
+// NSXPCConnection — serialized as a Mach send right, reconstructed on the
+// client via IOSurfaceLookupFromMachPort. No IOSurfaceRootUserClient access
+// needed on the receiving side.
 //
-// CARenderServer.framework no longer exists as a file on iOS 15+, but its
-// symbols were merged into QuartzCore.framework (which is always loaded in
-// every process). dlsym(RTLD_DEFAULT, ...) finds the symbol without dlopen.
-//
-// The destination IOSurface is created with IOSurfaceIsGlobal so camera-app
-// processes can call IOSurfaceLookup(id) after libSandy grants
-// IOSurfaceRootUserClient access.
+// MachXPCListener registers "com.dicoy.server" via bootstrap_check_in.
+// Sandboxed clients are granted bootstrap_look_up access by the Sandy profile's
+// mach-lookup extension (com.apple.security.exception.mach-lookup.global-name).
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <IOSurface/IOSurfaceRef.h>
-#import <sys/socket.h>
-#import <netinet/in.h>
 #import <pthread.h>
 #import <unistd.h>
 #import <stdarg.h>
 #import <os/log.h>
 #import <dlfcn.h>
-#import <sys/stat.h>
 #import "DiCoyProtocol.h"
+#import "DiCoyXPCProtocol.h"
+#import "MachXPCListener.h"
 
 // =========================================================================
-// CARenderServerRenderDisplay — in QuartzCore on iOS 15+
-//
-// Signature from reverse engineering of QuartzCore on iOS 13–15:
-//   port    : mach_port_t — pass 0 (use the default render-server port)
-//   display : CFStringRef — pass NULL (primary display)
-//   surface : IOSurfaceRef — destination; must be pre-allocated
-//   flags   : int         — pass 0
-// Returns 0 (KERN_SUCCESS) on success.
+// CARenderServerRenderDisplay — merged into QuartzCore on iOS 15+
 // =========================================================================
 
 typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t    port,
@@ -45,26 +35,39 @@ typedef kern_return_t (*CARSRenderDisplay_t)(mach_port_t    port,
                                              int            flags);
 
 // =========================================================================
-// Constants / globals
+// NSXPCInterface helper — whitelists IOSurface for receiveFrame:width:height:
+// Must match DiCoyClientInterface() in DiCoyClient.m exactly.
 // =========================================================================
 
-#define SRV_MAX_CLIENTS 8
-
-static os_log_t         sSrvLog;
-typedef struct { int fd; BOOL active; } SrvClient;
-static SrvClient        sClients[SRV_MAX_CLIENTS];
-static int              sActiveCount = 0;
-static pthread_mutex_t  sClientsMtx  = PTHREAD_MUTEX_INITIALIZER;
-
-// The one surface we render the screen into each frame (created on main thread
-// at startup; read-only from socket-server/broadcast thereafter).
-static IOSurfaceRef     gSurface    = NULL;
-static uint32_t         gSurfaceID  = 0;
-static uint16_t         gSurfaceW   = 0;
-static uint16_t         gSurfaceH   = 0;
+static NSXPCInterface *DiCoyClientInterface(void) {
+    static NSXPCInterface *iface;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        iface = [NSXPCInterface interfaceWithProtocol:@protocol(DiCoyXPCClient)];
+        NSSet *classes = [NSSet setWithObject:NSClassFromString(@"IOSurface")];
+        [iface setClasses:classes
+              forSelector:@selector(receiveFrame:width:height:)
+           argumentIndex:0
+                 ofReply:NO];
+    });
+    return iface;
+}
 
 // =========================================================================
-// Diagnostic writer — /var/tmp/dicoy_server.txt
+// Globals
+// =========================================================================
+
+static os_log_t              sSrvLog;
+static NSMutableSet         *sConnections; // all accepted NSXPCConnections
+static NSMutableSet         *sActive;      // connections that sent startCapture
+static pthread_mutex_t       sClientsMtx  = PTHREAD_MUTEX_INITIALIZER;
+
+static IOSurfaceRef          gSurface  = NULL;
+static uint16_t              gSurfaceW = 0;
+static uint16_t              gSurfaceH = 0;
+
+// =========================================================================
+// Diagnostic writer
 // =========================================================================
 
 static void srvLog(const char *fmt, ...) {
@@ -76,19 +79,69 @@ static void srvLog(const char *fmt, ...) {
     os_log(sSrvLog, "%{public}s", buf);
 }
 
-// =========================================================================
-// Helpers
-// =========================================================================
-
-static void   srvBroadcast(uint32_t surfID, uint16_t w, uint16_t h);
-static void   srvRemoveClient(int fd);
-static int    srvActiveCount(void);
-
-static void * srvSocketServer(void *arg);
-static void * srvHandleClient(void *arg);
+static int srvActiveCount(void) {
+    pthread_mutex_lock(&sClientsMtx);
+    int n = (int)sActive.count;
+    pthread_mutex_unlock(&sClientsMtx);
+    return n;
+}
 
 // =========================================================================
-// CADisplayLink target — lives on the main thread
+// XPC listener delegate — implements NSXPCListenerDelegate + DiCoyXPCServer
+// =========================================================================
+
+@interface DiCoyXPCListenerDelegate : NSObject <NSXPCListenerDelegate, DiCoyXPCServer>
+@end
+
+@implementation DiCoyXPCListenerDelegate
+
+- (BOOL)listener:(NSXPCListener *)listener shouldAcceptNewConnection:(NSXPCConnection *)conn {
+    conn.exportedInterface     = [NSXPCInterface interfaceWithProtocol:@protocol(DiCoyXPCServer)];
+    conn.exportedObject        = self;
+    conn.remoteObjectInterface = DiCoyClientInterface();
+
+    conn.invalidationHandler = ^{
+        pthread_mutex_lock(&sClientsMtx);
+        [sConnections removeObject:conn];
+        [sActive      removeObject:conn];
+        pthread_mutex_unlock(&sClientsMtx);
+        srvLog("XPC client disconnected — active=%d", srvActiveCount());
+    };
+
+    [conn resume];
+
+    pthread_mutex_lock(&sClientsMtx);
+    [sConnections addObject:conn];
+    pthread_mutex_unlock(&sClientsMtx);
+
+    srvLog("XPC client connected");
+    return YES;
+}
+
+// DiCoyXPCServer — called from the client over XPC
+
+- (oneway void)startCapture {
+    NSXPCConnection *conn = [NSXPCConnection currentConnection];
+    pthread_mutex_lock(&sClientsMtx);
+    [sActive addObject:conn];
+    int n = (int)sActive.count;
+    pthread_mutex_unlock(&sClientsMtx);
+    srvLog("startCapture — active=%d", n);
+}
+
+- (oneway void)stopCapture {
+    NSXPCConnection *conn = [NSXPCConnection currentConnection];
+    pthread_mutex_lock(&sClientsMtx);
+    [sActive removeObject:conn];
+    int n = (int)sActive.count;
+    pthread_mutex_unlock(&sClientsMtx);
+    srvLog("stopCapture — active=%d", n);
+}
+
+@end
+
+// =========================================================================
+// CADisplayLink target — runs on the main thread
 // =========================================================================
 
 @interface DiCoyCaptureTarget : NSObject
@@ -118,10 +171,20 @@ static void * srvHandleClient(void *arg);
     static BOOL sFirstFrame = YES;
     if (sFirstFrame) {
         sFirstFrame = NO;
-        srvLog("First frame rendered: id=%u %ux%u", gSurfaceID, gSurfaceW, gSurfaceH);
+        srvLog("First frame rendered: %ux%u", gSurfaceW, gSurfaceH);
     }
 
-    srvBroadcast(gSurfaceID, gSurfaceW, gSurfaceH);
+    // Snapshot sActive under lock, then iterate outside.
+    pthread_mutex_lock(&sClientsMtx);
+    NSArray *activeSnapshot = [sActive allObjects];
+    pthread_mutex_unlock(&sClientsMtx);
+
+    id surfObj = (__bridge id)gSurface;
+    for (NSXPCConnection *conn in activeSnapshot) {
+        [[conn remoteObjectProxyWithErrorHandler:^(NSError *err) {
+            srvLog("XPC send error: %s", err.localizedDescription.UTF8String);
+        }] receiveFrame:surfObj width:gSurfaceW height:gSurfaceH];
+    }
 }
 
 @end
@@ -130,52 +193,55 @@ static void * srvHandleClient(void *arg);
 // Public entry point
 // =========================================================================
 
-// Retained on main thread for the display link lifetime.
-static DiCoyCaptureTarget *sCaptureTarget;
-static CADisplayLink      *sDisplayLink;
+static DiCoyXPCListenerDelegate *sListenerDelegate;
+static MachXPCListener          *sXPCListener;
+static DiCoyCaptureTarget       *sCaptureTarget;
+static CADisplayLink            *sDisplayLink;
 
 void diCoyServerStart(void) {
     sSrvLog = os_log_create("com.dicoy.server", "springboard");
-    for (int i = 0; i < SRV_MAX_CLIENTS; i++) sClients[i].fd = -1;
 
     FILE *f = fopen("/var/tmp/dicoy_server.txt", "w");
     if (f) { fprintf(f, "DiCoyServer start PID=%d\n", getpid()); fclose(f); }
 
-    // Socket server runs on a background thread.
-    pthread_t t;
-    pthread_create(&t, NULL, srvSocketServer, NULL);
-    pthread_detach(t);
+    pthread_mutex_init(&sClientsMtx, NULL);
+    sConnections = [NSMutableSet set];
+    sActive      = [NSMutableSet set];
 
-    // Display capture must be set up on the main thread (display-server APIs,
-    // UIScreen, and CADisplayLink all require it).
+    // Register the Mach service name via bootstrap_check_in.
+    // Dopamine 2's patched launchd allows arbitrary check-in from SpringBoard.
+    // Sandy mach-lookup extension grants sandboxed clients bootstrap_look_up access.
+    sListenerDelegate = [DiCoyXPCListenerDelegate new];
+    sXPCListener = [[MachXPCListener alloc] initWithObject:sListenerDelegate
+                                                identifier:@DICOY_XPC_SERVICE_NAME];
+    if (sXPCListener) {
+        [sXPCListener resume];
+        srvLog("MachXPCListener registered: %s", DICOY_XPC_SERVICE_NAME);
+    } else {
+        srvLog("MachXPCListener bootstrap_check_in FAILED — screen mirror unavailable");
+        // Continue so display-link setup still logs; startCapture will never fire.
+    }
+
+    // Display capture setup must run on the main thread.
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        // ---------------------------------------------------------------
-        // 1. Locate CARenderServerRenderDisplay in the loaded QuartzCore.
-        // ---------------------------------------------------------------
+        // 1. Locate CARenderServerRenderDisplay (merged into QuartzCore on iOS 15+).
         CARSRenderDisplay_t renderFn =
             (CARSRenderDisplay_t)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
         srvLog("CARenderServerRenderDisplay = %s",
-               renderFn ? "FOUND in QuartzCore" : "NOT FOUND");
+               renderFn ? "FOUND" : "NOT FOUND");
 
         if (!renderFn) {
-            srvLog("ABORT: CARenderServerRenderDisplay absent — screen mirror unavailable");
+            srvLog("ABORT: CARenderServerRenderDisplay absent");
             return;
         }
 
-        // ---------------------------------------------------------------
-        // 2. Create the global destination IOSurface.
-        //    SpringBoard is an Apple-signed privileged process in the UI
-        //    session, so IOSurfaceIsGlobal is honored here (it fails in
-        //    Background-session daemons).
-        // ---------------------------------------------------------------
+        // 2. Create the destination IOSurface (local; delivered to clients via XPC).
         CGRect native = [UIScreen mainScreen].nativeBounds;
         uint16_t w = (uint16_t)native.size.width;
         uint16_t h = (uint16_t)native.size.height;
-        srvLog("Display native bounds: %ux%u", w, h);
+        srvLog("Display native: %ux%u", w, h);
 
-        // Use string literal for IOSurfaceIsGlobal to avoid the deprecated
-        // kIOSurfaceIsGlobal symbol (same string value, no warning).
         CFMutableDictionaryRef props = CFDictionaryCreateMutable(
             kCFAllocatorDefault, 0,
             &kCFTypeDictionaryKeyCallBacks,
@@ -184,159 +250,30 @@ void diCoyServerStart(void) {
         CFDictionarySetValue(props, kIOSurfaceHeight,          (__bridge CFNumberRef)@(h));
         CFDictionarySetValue(props, kIOSurfacePixelFormat,     (__bridge CFNumberRef)@(0x42475241)); // 'BGRA'
         CFDictionarySetValue(props, kIOSurfaceBytesPerElement, (__bridge CFNumberRef)@(4));
-        CFDictionarySetValue(props, CFSTR("IOSurfaceIsGlobal"), kCFBooleanTrue);
 
         gSurface = IOSurfaceCreate(props);
         CFRelease(props);
 
-        srvLog("IOSurfaceCreate(global) %ux%u = %p id=%u",
-               w, h, (void *)gSurface,
-               gSurface ? IOSurfaceGetID(gSurface) : 0);
-
         if (!gSurface) {
-            srvLog("ABORT: IOSurfaceCreate failed — SpringBoard may lack entitlement");
+            srvLog("ABORT: IOSurfaceCreate failed");
             return;
         }
 
-        gSurfaceID = IOSurfaceGetID(gSurface);
-        gSurfaceW  = w;
-        gSurfaceH  = h;
+        gSurfaceW = w;
+        gSurfaceH = h;
+        srvLog("IOSurface created: %p %ux%u", (void *)gSurface, w, h);
 
-        // ---------------------------------------------------------------
-        // 3. Start a CADisplayLink to drive frame capture at DICOY_TARGET_FPS.
-        // ---------------------------------------------------------------
+        // 3. Drive frame capture via CADisplayLink.
         sCaptureTarget           = [DiCoyCaptureTarget new];
         sCaptureTarget.renderFn  = renderFn;
         sCaptureTarget.failCount = 0;
 
-        sDisplayLink = [CADisplayLink
-            displayLinkWithTarget:sCaptureTarget
-                         selector:@selector(tick:)];
+        sDisplayLink = [CADisplayLink displayLinkWithTarget:sCaptureTarget
+                                                   selector:@selector(tick:)];
         sDisplayLink.preferredFramesPerSecond = DICOY_TARGET_FPS;
         [sDisplayLink addToRunLoop:[NSRunLoop mainRunLoop]
                            forMode:NSRunLoopCommonModes];
 
-        srvLog("CADisplayLink started at %d fps, surface id=%u",
-               DICOY_TARGET_FPS, gSurfaceID);
+        srvLog("CADisplayLink started at %d fps", DICOY_TARGET_FPS);
     });
-}
-
-// =========================================================================
-// Socket server
-// =========================================================================
-
-static void * srvSocketServer(void *arg) {
-    int srvFd = socket(AF_INET, SOCK_STREAM, 0);
-    if (srvFd < 0) { srvLog("FAIL: socket(): %s", strerror(errno)); return NULL; }
-
-    int yes = 1;
-    setsockopt(srvFd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port        = htons(DICOY_SERVER_PORT);
-
-    if (bind(srvFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        srvLog("FAIL: bind(127.0.0.1:%d): %s", DICOY_SERVER_PORT, strerror(errno));
-        close(srvFd); return NULL;
-    }
-    listen(srvFd, SRV_MAX_CLIENTS);
-    srvLog("TCP server listening on 127.0.0.1:%d", DICOY_SERVER_PORT);
-
-    while (1) {
-        int cfd = accept(srvFd, NULL, NULL);
-        if (cfd < 0) continue;
-
-        pthread_mutex_lock(&sClientsMtx);
-        BOOL ok = NO;
-        for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
-            if (sClients[i].fd < 0) {
-                sClients[i].fd = cfd; sClients[i].active = NO; ok = YES; break;
-            }
-        }
-        pthread_mutex_unlock(&sClientsMtx);
-        if (!ok) { close(cfd); continue; }
-
-        srvLog("Client connected fd=%d", cfd);
-        int *fdp = malloc(sizeof(int)); *fdp = cfd;
-        pthread_t t;
-        pthread_create(&t, NULL, srvHandleClient, fdp);
-        pthread_detach(t);
-    }
-    return NULL;
-}
-
-static void * srvHandleClient(void *arg) {
-    int fd = *(int *)arg; free(arg);
-    DicoyMessage msg;
-    while (1) {
-        if (recv(fd, &msg, sizeof(msg), MSG_WAITALL) != (ssize_t)sizeof(msg)) break;
-        if (msg.magic != DICOY_MAGIC) break;
-        switch ((DicoyMessageType)msg.type) {
-            case kDicoyMsgStartCapture:
-                pthread_mutex_lock(&sClientsMtx);
-                for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
-                    if (sClients[i].fd == fd && !sClients[i].active) {
-                        sClients[i].active = YES; sActiveCount++; break;
-                    }
-                }
-                pthread_mutex_unlock(&sClientsMtx);
-                srvLog("fd=%d START_CAPTURE active=%d", fd, sActiveCount);
-                break;
-            case kDicoyMsgStopCapture:
-                pthread_mutex_lock(&sClientsMtx);
-                for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
-                    if (sClients[i].fd == fd && sClients[i].active) {
-                        sClients[i].active = NO; sActiveCount--; break;
-                    }
-                }
-                pthread_mutex_unlock(&sClientsMtx);
-                break;
-            case kDicoyMsgPing: {
-                DicoyMessage pong = { .magic = DICOY_MAGIC, .type = kDicoyMsgPong };
-                send(fd, &pong, sizeof(pong), 0);
-                break;
-            }
-            default: break;
-        }
-    }
-    srvLog("Client disconnected fd=%d", fd);
-    srvRemoveClient(fd);
-    close(fd);
-    return NULL;
-}
-
-static void srvBroadcast(uint32_t surfID, uint16_t w, uint16_t h) {
-    DicoyMessage msg = {
-        .magic      = DICOY_MAGIC,
-        .type       = kDicoyMsgFrameReady,
-        .surface_id = surfID,
-        .width      = w,
-        .height     = h,
-        .timestamp  = (uint32_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ULL),
-    };
-    pthread_mutex_lock(&sClientsMtx);
-    for (int i = 0; i < SRV_MAX_CLIENTS; i++)
-        if (sClients[i].fd >= 0 && sClients[i].active)
-            send(sClients[i].fd, &msg, sizeof(msg), MSG_DONTWAIT);
-    pthread_mutex_unlock(&sClientsMtx);
-}
-
-static void srvRemoveClient(int fd) {
-    pthread_mutex_lock(&sClientsMtx);
-    for (int i = 0; i < SRV_MAX_CLIENTS; i++) {
-        if (sClients[i].fd == fd) {
-            if (sClients[i].active) sActiveCount--;
-            sClients[i].fd = -1; sClients[i].active = NO; break;
-        }
-    }
-    pthread_mutex_unlock(&sClientsMtx);
-}
-
-static int srvActiveCount(void) {
-    pthread_mutex_lock(&sClientsMtx);
-    int n = sActiveCount;
-    pthread_mutex_unlock(&sClientsMtx);
-    return n;
 }

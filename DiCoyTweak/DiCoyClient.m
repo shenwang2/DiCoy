@@ -1,23 +1,41 @@
 // DiCoyTweak/DiCoyClient.m
 //
-// Manages the persistent connection to DiCoyDaemon. Runs a blocking read
-// loop on a private queue so it never blocks an app's main thread or camera
-// callback queue. When a FRAME_READY message arrives, it looks up the
-// IOSurface by ID (zero-copy) and invokes the registered frameCallback.
+// NSXPCConnection client to the SpringBoard-hosted DiCoy server.
+// Connects via MachXPC (bootstrap_look_up), sends startCapture/stopCapture,
+// and receives IOSurface frames via receiveFrame:width:height:.
+//
+// IOSurface is transferred as an ObjC object over XPC — internally
+// serialized as a Mach send right. No IOSurfaceRootUserClient access needed.
 
 #import "DiCoyClient.h"
-#import <sys/socket.h>
-#import <netinet/in.h>
+#import "MachXPCConnection.h"
 #import <os/log.h>
 #import <QuartzCore/QuartzCore.h>
 
 static os_log_t gClientLog;
 
+// Returns a once-initialized NSXPCInterface for DiCoyXPCClient that whitelists
+// IOSurface as a serializable argument to receiveFrame:width:height:.
+// Must be set on BOTH ends of the connection (server's remoteObjectInterface
+// and client's exportedInterface) for NSXPCConnection to accept the class.
+static NSXPCInterface *DiCoyClientInterface(void) {
+    static NSXPCInterface *iface;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        iface = [NSXPCInterface interfaceWithProtocol:@protocol(DiCoyXPCClient)];
+        NSSet *classes = [NSSet setWithObject:NSClassFromString(@"IOSurface")];
+        [iface setClasses:classes
+              forSelector:@selector(receiveFrame:width:height:)
+           argumentIndex:0
+                 ofReply:NO];
+    });
+    return iface;
+}
+
 @implementation DiCoyClient {
-    int              _fd;
+    NSXPCConnection *_conn;
     BOOL             _connected;
     BOOL             _capturing;
-    dispatch_queue_t _readQueue;
 }
 
 + (void)initialize {
@@ -26,136 +44,106 @@ static os_log_t gClientLog;
     }
 }
 
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _fd = -1;
-        _readQueue = dispatch_queue_create("com.dicoy.tweak.readloop", DISPATCH_QUEUE_SERIAL);
-    }
-    return self;
-}
-
+// Attempts to connect via MachXPC with a 5-second Mach-message timeout.
+// Safe to call from any queue; blocks the calling thread during handshake.
 - (BOOL)connect {
     if (_connected) return YES;
 
-    _fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (_fd < 0) {
-        os_log_error(gClientLog, "socket(): %s", strerror(errno));
-        return NO;
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block BOOL success = NO;
+
+    [MachXPCConnection connectionFromMachXPCListener:@DICOY_XPC_SERVICE_NAME
+                                   qualityOfService:QOS_CLASS_USER_INTERACTIVE
+                       shouldCallHandlerInMainQueue:NO
+                                  connectionHandler:^(NSXPCConnection *conn) {
+        if (!conn) {
+            os_log_error(gClientLog, "MachXPCConnection: bootstrap_look_up failed or timeout");
+            dispatch_semaphore_signal(sema);
+            return;
+        }
+
+        conn.exportedInterface = DiCoyClientInterface();
+        conn.exportedObject    = self;
+        conn.remoteObjectInterface =
+            [NSXPCInterface interfaceWithProtocol:@protocol(DiCoyXPCServer)];
+
+        conn.invalidationHandler = ^{
+            os_log(gClientLog, "XPC connection invalidated");
+            self->_connected = NO;
+            self->_capturing = NO;
+            self->_conn      = nil;
+        };
+        conn.interruptionHandler = ^{
+            os_log(gClientLog, "XPC connection interrupted");
+        };
+
+        [conn resume];
+
+        self->_conn      = conn;
+        self->_connected = YES;
+        success          = YES;
+        dispatch_semaphore_signal(sema);
+    }];
+
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
+    dispatch_semaphore_wait(sema, deadline);
+
+    if (success) {
+        os_log(gClientLog, "Connected to %s", DICOY_XPC_SERVICE_NAME);
     }
-
-    struct sockaddr_in addr = {0};
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port        = htons(DICOY_SERVER_PORT);
-
-    if (connect(_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        os_log_error(gClientLog, "connect(127.0.0.1:%d): %s", DICOY_SERVER_PORT, strerror(errno));
-        close(_fd);
-        _fd = -1;
-        return NO;
-    }
-
-    _connected = YES;
-    os_log(gClientLog, "Connected to daemon");
-    [self startReadLoop];
-    return YES;
+    return success;
 }
 
 - (void)disconnect {
     if (!_connected) return;
+    [_conn invalidate];
+    _conn      = nil;
     _connected = NO;
     _capturing = NO;
-    close(_fd);
-    _fd = -1;
-}
-
-- (void)sendType:(DicoyMessageType)type {
-    if (_fd < 0) return;
-    DicoyMessage msg = { .magic = DICOY_MAGIC, .type = (uint8_t)type };
-    send(_fd, &msg, sizeof(msg), 0);
 }
 
 - (void)startCapture {
-    if (_capturing) return;
+    if (_capturing || !_conn) return;
     _capturing = YES;
-    [self sendType:kDicoyMsgStartCapture];
+    [[_conn remoteObjectProxy] startCapture];
+    os_log(gClientLog, "startCapture sent");
 }
 
 - (void)stopCapture {
-    if (!_capturing) return;
+    if (!_capturing || !_conn) return;
     _capturing = NO;
-    [self sendType:kDicoyMsgStopCapture];
+    [[_conn remoteObjectProxy] stopCapture];
 }
 
-// Spawns the blocking read loop on _readQueue.
-// The loop terminates when the socket closes or returns an error.
-- (void)startReadLoop {
-    int fd = _fd;
-    __weak typeof(self) weak = self;
+// DiCoyXPCClient — called on the XPC queue each time the server sends a frame.
+- (void)receiveFrame:(id)surface width:(uint32_t)w height:(uint32_t)h {
+    IOSurfaceRef surf = (__bridge IOSurfaceRef)surface;
+    if (!surf) return;
 
-    dispatch_async(_readQueue, ^{
-        DicoyMessage msg;
+    static BOOL sLogged = NO;
+    if (!sLogged) {
+        sLogged = YES;
+        [[NSString stringWithFormat:@"ok:xpc w=%u h=%u", w, h]
+         writeToFile:@"/var/tmp/dicoy_surf.txt"
+         atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
 
-        while (weak.isConnected) {
-            // MSG_WAITALL: block until all sizeof(msg) bytes arrive.
-            ssize_t n = recv(fd, &msg, sizeof(msg), MSG_WAITALL);
-            if (n != (ssize_t)sizeof(msg)) break;
-            if (msg.magic != DICOY_MAGIC) continue;
-
-            if ((DicoyMessageType)msg.type == kDicoyMsgFrameReady) {
-                // -------------------------------------------------------
-                // Zero-copy surface lookup.
-                //
-                // The daemon sent only a 4-byte IOSurfaceID. We call
-                // IOSurfaceLookup() which resolves the ID to a local
-                // IOSurfaceRef backed by the SAME physical GPU pages the
-                // daemon rendered into. No pixel data is copied across
-                // the socket or between processes at any point.
-                //
-                // The returned surface has a +1 retain count; we balance
-                // it with CFRelease after the callback returns.
-                // -------------------------------------------------------
-                IOSurfaceRef surface = IOSurfaceLookup(msg.surface_id);
-                if (surface) {
-                    // Write on first success so we know frames are flowing.
-                    static BOOL sLogged = NO;
-                    if (!sLogged) {
-                        sLogged = YES;
-                        [[NSString stringWithFormat:@"ok:id=%u w=%u h=%u",
-                          msg.surface_id, msg.width, msg.height]
-                         writeToFile:@"/var/tmp/dicoy_surf.txt"
-                         atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                    }
-                    DiCoyFrameCallback cb = weak.frameCallback;
-                    if (cb) cb(surface, msg.width, msg.height);
-                    CFRelease(surface);
-                } else {
-                    os_log_error(gClientLog, "IOSurfaceLookup(%u) returned nil", msg.surface_id);
-                    // Write every failure so the user can see it without syslog.
-                    [[NSString stringWithFormat:@"nil:id=%u", msg.surface_id]
-                     writeToFile:@"/var/tmp/dicoy_surf.txt"
-                     atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                }
-            }
-        }
-
-        os_log(gClientLog, "Read loop ended");
-        [weak disconnect];
-    });
+    DiCoyFrameCallback cb = self.frameCallback;
+    if (cb) cb(surf, (uint16_t)w, (uint16_t)h);
 }
 
 - (BOOL)isConnected { return _connected; }
 
+// Rate-limited reconnect — dispatched to a background queue so camera callback
+// queues are never blocked by the 5-second Mach handshake timeout.
 - (void)reconnectIfNeeded {
     if (_connected) return;
-    // Rate-limit reconnect attempts to once per 3 seconds.
     static CFTimeInterval sLastAttempt = 0;
     CFTimeInterval now = CACurrentMediaTime();
     if (now - sLastAttempt < 3.0) return;
     sLastAttempt = now;
 
-    dispatch_async(_readQueue, ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (self->_connected) return;
         if ([self connect]) {
             self->_capturing = NO;

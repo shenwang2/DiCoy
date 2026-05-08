@@ -5,11 +5,17 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DiCoyTweak
 
-DiCoyTweak_FILES      = Tweak.x DiCoyClient.m DiCoyServer.m
+DiCoyTweak_FILES      = Tweak.x DiCoyClient.m DiCoyServer.m \
+    $(THEOS_PROJECT_DIR)/../vendor/SandyXpc/MachXPC/MachXPCConnection.m \
+    $(THEOS_PROJECT_DIR)/../vendor/SandyXpc/MachXPC/MachXPCListener.m \
+    $(THEOS_PROJECT_DIR)/../vendor/SandyXpc/MachXPC/MachXPCHost.m \
+    $(THEOS_PROJECT_DIR)/../vendor/SandyXpc/MachXPC/SXXFindSymbols.m
 DiCoyTweak_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo IOSurface \
                         QuartzCore CoreFoundation AudioToolbox CoreImage IOKit
 DiCoyTweak_LIBRARIES  = sandy
-DiCoyTweak_CFLAGS     = -fobjc-arc -I$(THEOS_PROJECT_DIR)
+DiCoyTweak_CFLAGS     = -fobjc-arc \
+    -I$(THEOS_PROJECT_DIR) \
+    -I$(THEOS_PROJECT_DIR)/../vendor/SandyXpc/MachXPC
 
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
   DiCoyTweak_CFLAGS  += -DDICOY_ROOTLESS=1

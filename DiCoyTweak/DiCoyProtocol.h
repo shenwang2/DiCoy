@@ -3,9 +3,6 @@
 
 #include <stdint.h>
 
-// Magic bytes in every message header to detect corrupt/misaligned reads.
-#define DICOY_MAGIC ((uint16_t)0xD1C0)
-
 // Runtime path prefix: /var/jb for rootless jailbreaks, empty for rootful.
 // Set by passing -DDICOY_ROOTLESS=1 in the Makefile for rootless builds.
 #ifdef DICOY_ROOTLESS
@@ -13,13 +10,6 @@
 #else
 #  define DICOY_JB_PREFIX ""
 #endif
-
-// IPC: localhost TCP instead of Unix domain socket.
-// com.apple.app-sandbox.read-write (file extension) does NOT cover the
-// network-outbound syscall that connect() on a Unix socket requires.
-// Every app with com.apple.security.network.client (all networking apps,
-// including Discord) can connect to 127.0.0.1 with no Sandy extension needed.
-#define DICOY_SERVER_PORT 57722
 
 // Preferences plist path – user preferences always live at the real mobile home
 // regardless of jailbreak type; the JB prefix is for JB binaries/libraries only.
@@ -33,35 +23,11 @@
 // Target capture rate. Change here propagates to both daemon and tweak.
 #define DICOY_TARGET_FPS 30
 
-// -----------------------------------------------------------------------
-// Wire protocol
-// All messages are fixed-size. Multi-byte fields are host byte order
-// (sender and receiver are always the same physical device).
-// -----------------------------------------------------------------------
-
-typedef enum : uint8_t {
-    kDicoyMsgStartCapture = 0x01, // Tweak  -> Daemon: begin pushing frames
-    kDicoyMsgStopCapture  = 0x02, // Tweak  -> Daemon: pause frame delivery
-    kDicoyMsgFrameReady   = 0x03, // Daemon -> Tweak:  new IOSurface available
-    kDicoyMsgPing         = 0x04, // Tweak  -> Daemon: keepalive probe
-    kDicoyMsgPong         = 0x05, // Daemon -> Tweak:  keepalive response
-} DicoyMessageType;
-
 // Operating mode, kept in sync with DiCoyPrefs "mode" key.
 typedef enum : uint8_t {
     kDicoyModeOff          = 0,
     kDicoyModeScreenMirror = 1,
     kDicoyModeMediaInject  = 2,
 } DicoyMode;
-
-typedef struct __attribute__((packed)) {
-    uint16_t magic;      // Always DICOY_MAGIC
-    uint8_t  type;       // DicoyMessageType
-    uint8_t  mode;       // DicoyMode (informational; daemon is authoritative)
-    uint32_t surface_id; // IOSurface ID (valid only for kDicoyMsgFrameReady)
-    uint16_t width;      // Frame width  in pixels
-    uint16_t height;     // Frame height in pixels
-    uint32_t timestamp;  // Monotonic ms since daemon start (frame ordering)
-} DicoyMessage;
 
 #endif // DICOY_PROTOCOL_H

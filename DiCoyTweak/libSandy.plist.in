@@ -8,6 +8,15 @@
 	</array>
 	<key>Extensions</key>
 	<array>
+		<!-- Mach service lookup — required for MachXPCConnection bootstrap_look_up -->
+		<dict>
+			<key>type</key>
+			<string>mach</string>
+			<key>extension_class</key>
+			<string>com.apple.security.exception.mach-lookup.global-name</string>
+			<key>mach_name</key>
+			<string>com.dicoy.server</string>
+		</dict>
 		<!-- Preferences plist – real mobile home, no JB prefix -->
 		<dict>
 			<key>type</key>
@@ -16,15 +25,6 @@
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
 			<string>/var/mobile/Library/Preferences/com.dicoy.prefs.plist</string>
-		</dict>
-		<!-- Socket -->
-		<dict>
-			<key>type</key>
-			<string>file</string>
-			<key>extension_class</key>
-			<string>com.apple.app-sandbox.read-write</string>
-			<key>path</key>
-			<string>/var/tmp/dicoy.sock</string>
 		</dict>
 		<!-- Diagnostic files written by the tweak inside camera-app processes -->
 		<dict>
@@ -50,15 +50,6 @@
 			<string>com.apple.app-sandbox.read-write</string>
 			<key>path</key>
 			<string>/var/tmp/dicoy_debug.txt</string>
-		</dict>
-		<!-- IOSurface cross-process lookup -->
-		<dict>
-			<key>type</key>
-			<string>iokit_user_client</string>
-			<key>extension_class</key>
-			<string>com.apple.security.exception.iokit-user-client-class</string>
-			<key>registry_entry_class</key>
-			<string>IOSurfaceRootUserClient</string>
 		</dict>
 	</array>
 </dict>
