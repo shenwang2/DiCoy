@@ -100,10 +100,13 @@ static int srvActiveCount(void) {
     conn.exportedObject        = self;
     conn.remoteObjectInterface = DiCoyClientInterface();
 
+    NSXPCConnection * __weak weakConn = conn;
     conn.invalidationHandler = ^{
+        NSXPCConnection *c = weakConn;
+        if (!c) return;
         pthread_mutex_lock(&sClientsMtx);
-        [sConnections removeObject:conn];
-        [sActive      removeObject:conn];
+        [sConnections removeObject:c];
+        [sActive      removeObject:c];
         pthread_mutex_unlock(&sClientsMtx);
         srvLog("XPC client disconnected — active=%d", srvActiveCount());
     };
