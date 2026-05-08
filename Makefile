@@ -3,7 +3,6 @@ THEOS_BUILD_DIR = packages
 
 include $(THEOS)/makefiles/common.mk
 
-SUBPROJECTS += DiCoyDaemon
 SUBPROJECTS += DiCoyTweak
 SUBPROJECTS += DiCoyPrefs
 

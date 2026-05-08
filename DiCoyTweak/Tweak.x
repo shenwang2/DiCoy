@@ -12,6 +12,8 @@
 #import <objc/runtime.h>
 #import "DiCoyClient.h"
 #import "DiCoyProtocol.h"
+
+extern void diCoyServerStart(void); // DiCoyServer.m — activated in SpringBoard only
 #import <substrate.h>
 #import <libSandy.h>
 
@@ -1167,4 +1169,9 @@ static void modeChangedCallback(CFNotificationCenterRef  center,
         NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately
     );
+    // SpringBoard has the UI-session bootstrap port and Apple-signed entitlements
+    // (com.apple.CARenderServer, IOSurfaceFamily) that the Background daemon lacked.
+    if ([NSProcessInfo.processInfo.processName isEqualToString:@"SpringBoard"]) {
+        diCoyServerStart();
+    }
 }

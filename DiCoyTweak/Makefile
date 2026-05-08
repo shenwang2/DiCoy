@@ -5,7 +5,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DiCoyTweak
 
-DiCoyTweak_FILES      = Tweak.x DiCoyClient.m
+DiCoyTweak_FILES      = Tweak.x DiCoyClient.m DiCoyServer.m
 DiCoyTweak_FRAMEWORKS = Foundation UIKit AVFoundation CoreMedia CoreVideo IOSurface \
                         QuartzCore CoreFoundation AudioToolbox CoreImage
 DiCoyTweak_LIBRARIES  = sandy
