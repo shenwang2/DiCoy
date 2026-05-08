@@ -158,7 +158,9 @@ static int srvActiveCount(void) {
     if (srvActiveCount() == 0) return;
     if (!gSurface)             return;
 
-    kern_return_t kr = self.renderFn(0, NULL, gSurface, 0);
+    // "LCD" is the internal display identifier on iPhone.
+    // NULL renders no display and produces a black surface.
+    kern_return_t kr = self.renderFn(0, CFSTR("LCD"), gSurface, 0);
     if (kr != 0) {
         self.failCount++;
         if (self.failCount % 30 == 1)
@@ -174,7 +176,13 @@ static int srvActiveCount(void) {
     static BOOL sFirstFrame = YES;
     if (sFirstFrame) {
         sFirstFrame = NO;
-        srvLog("First frame rendered: %ux%u", gSurfaceW, gSurfaceH);
+        // Sample the first pixel to verify the surface has non-zero content.
+        IOSurfaceLock(gSurface, kIOSurfaceLockReadOnly, NULL);
+        uint8_t *px = (uint8_t *)IOSurfaceGetBaseAddress(gSurface);
+        BOOL hasContent = px && (px[0] || px[1] || px[2]);
+        IOSurfaceUnlock(gSurface, kIOSurfaceLockReadOnly, NULL);
+        srvLog("First frame rendered: %ux%u — surface %s",
+               gSurfaceW, gSurfaceH, hasContent ? "HAS CONTENT" : "IS BLACK (check display name)");
     }
 
     // Snapshot sActive under lock, then iterate outside.
