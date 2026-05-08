@@ -3,7 +3,7 @@
 #import "DiCoyPrefsListController.h"
 #import "DiCoyProtocol.h"
 #import <spawn.h>
-#import <sys/stat.h>
+#import <mach-o/dyld.h>
 
 // The tweak reads the plist file directly (libSandy-unlocked), bypassing cfprefsd.
 // We write to this path on Save so the tweak picks up new values on the next
@@ -20,14 +20,29 @@ static NSDictionary *defaultPrefs(void) {
 }
 
 // Detect jailbreak environment at runtime.
-// Rootless: /var/jb is a real directory (Dopamine, palera1n rootless).
-// RootHide: /var/jb is a symlink redirected to a different root.
-// Rootful:  /var/jb does not exist.
-static NSString *jbEnvironmentString(void) {
-    struct stat st;
-    if (lstat("/var/jb", &st) != 0) return @"rootful";
-    if (S_ISLNK(st.st_mode)) return @"roothide";
-    return @"rootless";
+static NSString *dicoyJBEnvString(void) {
+    // roothide must be checked first. Its patcher remaps /var/jb paths to rootful-style
+    // locations, so /var/jb may still be visible while the bundle is at /Library/...
+    // The marker file and injected dylib are the reliable identifiers.
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb/.installed_roothide"]) {
+        return @"roothide";
+    }
+
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "roothide")) {
+            return @"roothide";
+        }
+    }
+
+    // Rootless (Dopamine 2, palera1n rootless): /var/jb exists as a symlink to the
+    // jailbreak mount. On Dopamine, NSBundle resolves the symlink so the bundle path
+    // does NOT start with "/var/jb" — checking directory existence is the reliable test.
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+        return @"rootless";
+    }
+
+    return @"rootful";
 }
 
 // ---------------------------------------------------------------------------
@@ -75,7 +90,7 @@ static NSString *jbEnvironmentString(void) {
     NSBundle *bundle  = [NSBundle bundleForClass:[self class]];
     NSString *version = bundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"?";
     NSString *ios     = UIDevice.currentDevice.systemVersion;
-    NSString *env     = jbEnvironmentString();
+    NSString *env     = dicoyJBEnvString();
     NSString *text    = [NSString stringWithFormat:@"DiCoy v%@ (iOS %@ %@)", version, ios, env];
 
     for (PSSpecifier *s in [self specifiers]) {
