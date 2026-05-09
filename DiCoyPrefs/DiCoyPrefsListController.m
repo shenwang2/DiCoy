@@ -126,17 +126,36 @@ static NSString *dicoyJBEnvString(void) {
 }
 
 - (void)_saveButtonTapped {
+    // Screen Mirror needs a full userspace reboot so the render server process
+    // initialises fresh. A respring (SpringBoard-only restart) is not enough.
+    NSString *selectedMode = nil;
+    for (PSSpecifier *s in self.specifiers) {
+        if ([s.properties[@"key"] isEqualToString:@"mode"]) {
+            selectedMode = [self readPreferenceValue:s];
+            break;
+        }
+    }
+
+    BOOL needsUserReboot = [selectedMode isEqualToString:@"screenMirror"];
+
     UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Apply Changes"
-                         message:@"DiCoy requires a respring to apply these settings."
+        alertControllerWithTitle:needsUserReboot ? @"Userspace Reboot Required"
+                                                 : @"Apply Changes"
+                         message:needsUserReboot
+                                 ? @"Screen Mirror requires a userspace reboot (not just a respring) to initialise the display capture server."
+                                 : @"DiCoy requires a respring to apply these settings."
                   preferredStyle:UIAlertControllerStyleAlert];
 
     [alert addAction:[UIAlertAction
-        actionWithTitle:@"Respring"
+        actionWithTitle:needsUserReboot ? @"Reboot Userspace" : @"Respring"
                   style:UIAlertActionStyleDestructive
                 handler:^(UIAlertAction *a) {
         [self _flushToDisk];
-        [self _respring];
+        if (needsUserReboot) {
+            [self _userspaceReboot];
+        } else {
+            [self _respring];
+        }
     }]];
 
     [alert addAction:[UIAlertAction

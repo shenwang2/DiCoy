@@ -13,7 +13,7 @@
             <key>label</key>
             <string>Camera Feed Mode</string>
             <key>footerText</key>
-            <string>Screen Mirror replaces the camera with a live capture of the device display. Media Inject plays a local video or image file instead.</string>
+            <string>Screen Mirror replaces the camera with a live capture of the device display. Requires a userspace reboot (not just a respring) to take effect. Media Inject plays a local video or image file instead.</string>
         </dict>
 
         <dict>
