@@ -684,15 +684,13 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     UInt64 dropBeforeOutput = (totalFramesToProduce > numFrames)
         ? (totalFramesToProduce - numFrames) : 0;
     // Deadband: only apply drift correction when the accumulated lag is large
-    // enough to matter. Below ~300 ms, the drops manifest as audible clicks
+    // enough to matter. Below ~100 ms, the drops are micro-chops (sub-millisecond)
+    // that happen tens of times per second and manifest as audible crackling
     // without measurably improving A/V sync. When real drift exceeds the
-    // threshold, we catch up in one bigger step (one rare click instead of
-    // continuous crackle).
-    UInt64 minDropFrames = (UInt64)(targetSR * 0.300);     // 300ms
-    if (dropBeforeOutput < minDropFrames) {
-        dropBeforeOutput = 0;
-        wantDrainedAfterThisCall = _audioSamplesDrained + numFrames;
-    }
+    // threshold, we catch up in one bigger step (one click instead of continuous
+    // crackle).
+    UInt64 minDropFrames = (UInt64)(targetSR * 0.100);     // 100ms
+    if (dropBeforeOutput < minDropFrames) dropBeforeOutput = 0;
     // If capture is SLOWER than real time, drop samples so we stay in wall-clock
     // sync (prevents the audio from lagging further and further behind the video).
     NSUInteger dropBytes   = (NSUInteger)(dropBeforeOutput * frameStride);
