@@ -67,6 +67,12 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     NSUInteger                _audioStagingOffset;
     double                    _audioStagingSampleRate;
     UInt32                    _audioStagingChannels;
+    // Wall-clock anchor for real-time playback. Video and audio both map their
+    // positions off this, so playback runs at 1× regardless of how fast or slow
+    // the host app's capture callback fires, and the two streams stay in sync.
+    CFTimeInterval            _playbackAnchor;
+    double                    _mediaDurationSec;
+    UInt64                    _audioSamplesDrained;
 }
 
 + (instancetype)sharedManager {
@@ -123,6 +129,17 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
             self.videoRotation = kDicoyRotate180;
         else
             self.videoRotation = kDicoyRotateDefault;
+        // Cache media duration once so the reader knows where to loop.
+        if (self.currentMediaPath.length) {
+            AVURLAsset *probe = [AVURLAsset URLAssetWithURL:
+                [NSURL fileURLWithPath:self.currentMediaPath] options:nil];
+            double sec = CMTimeGetSeconds(probe.duration);
+            _mediaDurationSec = (sec > 0.05) ? sec : 0;
+        } else {
+            _mediaDurationSec = 0;
+        }
+        _playbackAnchor      = CACurrentMediaTime();
+        _audioSamplesDrained = 0;
         [self _setupVideoReaderForPath:self.currentMediaPath
                            pixelFormat:kCVPixelFormatType_32BGRA];
     } else {
@@ -171,6 +188,9 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
     _audioStagingOffset = 0;
     _audioStagingSampleRate = 0;
     _audioStagingChannels = 0;
+    _playbackAnchor = 0;
+    _mediaDurationSec = 0;
+    _audioSamplesDrained = 0;
 }
 
 // One reader, one track output. Raw decoded pixels — no auto-rotation.
@@ -354,24 +374,96 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
         if (fd) sub = CMFormatDescriptionGetMediaSubType(fd);
     }
 
-    // Fast path: reader exists, format matches, not at EOF.
+    // Wall-clock target: how far into the (looped) media are we right now?
+    // We drive playback off the system clock instead of advancing one frame per
+    // callback — this decouples playback speed from the host app's capture rate.
+    CFTimeInterval now      = CACurrentMediaTime();
+    CFTimeInterval elapsed  = (_playbackAnchor > 0) ? (now - _playbackAnchor) : 0;
+    double         loopSec  = _mediaDurationSec;
+    double         targetSec = (loopSec > 0) ? fmod(elapsed, loopSec) : elapsed;
+
+    // Pull the frame whose PTS is the greatest ≤ targetSec. When the reader's
+    // current frame is still in the future (callback came faster than video fps),
+    // we reuse the cached frame instead of advancing. When the reader is behind
+    // (callback is slower than video fps, e.g. QQ throttles to 15fps on a 30fps
+    // video), we drop frames to catch up.
     os_unfair_lock_lock(&_videoReaderLock);
     BOOL ok = _videoReader
            && (_videoReader.status == AVAssetReaderStatusReading)
            && (_videoFormat == sub);
-    CMSampleBufferRef fileBuf = ok ? [_videoOutput copyNextSampleBuffer] : nil;
-    os_unfair_lock_unlock(&_videoReaderLock);
-
-    if (!fileBuf) {
-        // EOF, wrong format, or not yet initialised — recreate with the correct format.
+    if (!ok) {
+        os_unfair_lock_unlock(&_videoReaderLock);
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
         [self _setupVideoReaderForPath:path pixelFormat:sub];
         os_unfair_lock_lock(&_videoReaderLock);
         ok = _videoReader && (_videoReader.status == AVAssetReaderStatusReading);
-        fileBuf = ok ? [_videoOutput copyNextSampleBuffer] : nil;
+        if (!ok) { os_unfair_lock_unlock(&_videoReaderLock); return NULL; }
+    }
+
+    CMSampleBufferRef fileBuf = nil;
+    // Track reader's current decode position. When it overshoots the loop
+    // duration, restart. When targetSec jumps backwards across the loop boundary,
+    // restart. Otherwise pull frames until reader PTS catches up to targetSec.
+    static double sReaderLastPTS = 0;     // PTS of the last frame we returned
+    // (static is fine here: at most one reader exists at a time; startMirroring
+    //  resets state via _setupVideoReaderForPath:. _videoReaderLock gates access.)
+    BOOL needReset = NO;
+    if (targetSec + 0.001 < sReaderLastPTS) needReset = YES;  // looped past zero
+    if (needReset) {
         os_unfair_lock_unlock(&_videoReaderLock);
-        if (!fileBuf) return NULL;
+        [self _setupVideoReaderForPath:self.currentMediaPath pixelFormat:sub];
+        os_unfair_lock_lock(&_videoReaderLock);
+        sReaderLastPTS = 0;
+        ok = _videoReader && (_videoReader.status == AVAssetReaderStatusReading);
+        if (!ok) { os_unfair_lock_unlock(&_videoReaderLock); return NULL; }
+    }
+
+    // Only advance the reader when we are BEHIND wall-clock target. If the host
+    // app calls us faster than the video's fps (e.g. 60Hz callbacks on a 30fps
+    // video), we return the cached last frame without consuming a new one —
+    // otherwise playback speeds up by the callback/video ratio.
+    BOOL needAdvance = (sReaderLastPTS < targetSec - 0.0005);
+    if (needAdvance) {
+        // Drop-to-target: advance reader while next-frame PTS < targetSec.
+        CMSampleBufferRef nextBuf = [_videoOutput copyNextSampleBuffer];
+        while (nextBuf) {
+            CMTime pts = CMSampleBufferGetOutputPresentationTimeStamp(nextBuf);
+            if (!CMTIME_IS_VALID(pts)) pts = CMSampleBufferGetPresentationTimeStamp(nextBuf);
+            double ptsSec = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : sReaderLastPTS;
+            if (fileBuf) CFRelease(fileBuf);
+            fileBuf = nextBuf;
+            sReaderLastPTS = ptsSec;
+            if (ptsSec >= targetSec) { nextBuf = nil; break; }
+            nextBuf = [_videoOutput copyNextSampleBuffer];
+        }
+    }
+
+    // Reader drained — EOF during catch-up. Restart and grab the first frame.
+    if (needAdvance && !fileBuf) {
+        os_unfair_lock_unlock(&_videoReaderLock);
+        [self _setupVideoReaderForPath:self.currentMediaPath pixelFormat:sub];
+        os_unfair_lock_lock(&_videoReaderLock);
+        sReaderLastPTS = 0;
+        ok = _videoReader && (_videoReader.status == AVAssetReaderStatusReading);
+        fileBuf = ok ? [_videoOutput copyNextSampleBuffer] : nil;
+        if (fileBuf) {
+            CMTime pts = CMSampleBufferGetOutputPresentationTimeStamp(fileBuf);
+            if (!CMTIME_IS_VALID(pts)) pts = CMSampleBufferGetPresentationTimeStamp(fileBuf);
+            sReaderLastPTS = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : 0;
+        }
+    }
+    os_unfair_lock_unlock(&_videoReaderLock);
+
+    if (!fileBuf) {
+        // Either we chose not to advance (ahead of target, reuse cached) or
+        // reader is still initialising. Return the cached last frame so the
+        // host gets a continuous stream of valid buffers.
+        os_unfair_lock_lock(&_previewFrameLock);
+        CMSampleBufferRef cached = _lastInjectedFrame
+            ? (CMSampleBufferRef)CFRetain(_lastInjectedFrame) : NULL;
+        os_unfair_lock_unlock(&_previewFrameLock);
+        return cached;
     }
 
     // Mirror timing from the real buffer so the app's pipeline accepts the frame.
@@ -463,18 +555,52 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
 }
 
 - (CMSampleBufferRef)nextAudioSampleBufferMatchingASBD:(const AudioStreamBasicDescription *)asbd {
+    // Loop-aware audio delivery: advance reader to the position matching the
+    // same wall-clock target the video uses, so the two streams stay in sync.
+    double targetSec = 0;
+    if (_playbackAnchor > 0 && _mediaDurationSec > 0) {
+        double elapsed = CACurrentMediaTime() - _playbackAnchor;
+        targetSec = fmod(elapsed, _mediaDurationSec);
+    }
+
+    static double sAudioReaderLastPTS = 0;
+
     os_unfair_lock_lock(&_audioReaderLock);
     BOOL needsSetup = (_audioReader == nil);
-    CMSampleBufferRef buf = nil;
-    if (!needsSetup && _audioReader.status == AVAssetReaderStatusReading) {
-        buf = [_audioOutput copyNextSampleBuffer];
-    }
+    BOOL needsRestart = (!needsSetup &&
+                        targetSec + 0.01 < sAudioReaderLastPTS);  // looped
     os_unfair_lock_unlock(&_audioReaderLock);
 
-    if (needsSetup || !buf) {
+    if (needsSetup || needsRestart) {
         NSString *path = self.currentMediaPath;
         if (!path.length) return NULL;
         [self _setupAudioReaderForPath:path matchingASBD:asbd];
+        sAudioReaderLastPTS = 0;
+    }
+
+    CMSampleBufferRef buf = nil;
+    os_unfair_lock_lock(&_audioReaderLock);
+    // Drop-to-target: pull audio buffers until reader PTS ≥ targetSec.
+    CMSampleBufferRef next = (_audioReader && _audioReader.status == AVAssetReaderStatusReading)
+        ? [_audioOutput copyNextSampleBuffer] : nil;
+    while (next) {
+        CMTime pts = CMSampleBufferGetOutputPresentationTimeStamp(next);
+        if (!CMTIME_IS_VALID(pts)) pts = CMSampleBufferGetPresentationTimeStamp(next);
+        double ptsSec = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : sAudioReaderLastPTS;
+        if (buf) CFRelease(buf);
+        buf = next;
+        sAudioReaderLastPTS = ptsSec;
+        if (ptsSec >= targetSec) { next = nil; break; }
+        next = [_audioOutput copyNextSampleBuffer];
+    }
+    os_unfair_lock_unlock(&_audioReaderLock);
+
+    // Reader drained — loop.
+    if (!buf) {
+        NSString *path = self.currentMediaPath;
+        if (!path.length) return NULL;
+        [self _setupAudioReaderForPath:path matchingASBD:asbd];
+        sAudioReaderLastPTS = 0;
         os_unfair_lock_lock(&_audioReaderLock);
         if (_audioReader && _audioReader.status == AVAssetReaderStatusReading) {
             buf = [_audioOutput copyNextSampleBuffer];
@@ -509,6 +635,9 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
 
 // AudioUnit render path (WebRTC / Voice Processing I/O). Reads int16 LPCM from the
 // AVAssetReader staging buffer and converts to whatever format the AU expects.
+// Playback position is driven off the wall-clock anchor _playbackAnchor so the
+// effective rate stays 1× even if the host AU render callback is slow, and audio
+// stays in lockstep with the video stream (which uses the same anchor).
 - (BOOL)fillAudioIntoBufferList:(AudioBufferList *)ioData
                       numFrames:(UInt32)numFrames
                            asbd:(const AudioStreamBasicDescription *)asbd {
@@ -536,10 +665,31 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
         _audioStagingOffset     = 0;
         _audioStagingSampleRate = targetSR;
         _audioStagingChannels   = targetCh;
+        _audioSamplesDrained    = 0;
     }
 
+    // How many samples SHOULD we have delivered by now, looping-aware?
+    UInt64 targetTotalSamples = 0;
+    if (_playbackAnchor > 0) {
+        double elapsed = CACurrentMediaTime() - _playbackAnchor;
+        if (elapsed < 0) elapsed = 0;
+        targetTotalSamples = (UInt64)(elapsed * targetSR);
+    } else {
+        targetTotalSamples = _audioSamplesDrained + numFrames;
+    }
+    UInt64 wantDrainedAfterThisCall = targetTotalSamples;
+    if (wantDrainedAfterThisCall < _audioSamplesDrained + numFrames)
+        wantDrainedAfterThisCall = _audioSamplesDrained + numFrames;
+    UInt64 totalFramesToProduce = wantDrainedAfterThisCall - _audioSamplesDrained;
+    UInt64 dropBeforeOutput = (totalFramesToProduce > numFrames)
+        ? (totalFramesToProduce - numFrames) : 0;
+    // If capture is SLOWER than real time, drop samples so we stay in wall-clock
+    // sync (prevents the audio from lagging further and further behind the video).
+    NSUInteger dropBytes   = (NSUInteger)(dropBeforeOutput * frameStride);
+    NSUInteger needAllBytes = bytesNeeded + dropBytes;
+
     // Drain file into staging until we have enough int16 frames, looping on EOF.
-    while ((_audioStagingBuffer.length - _audioStagingOffset) < bytesNeeded) {
+    while ((_audioStagingBuffer.length - _audioStagingOffset) < needAllBytes) {
         os_unfair_lock_lock(&_audioReaderLock);
         CMSampleBufferRef fb = (_audioReader && _audioReader.status == AVAssetReaderStatusReading)
             ? [_audioOutput copyNextSampleBuffer] : nil;
@@ -570,6 +720,12 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
         CFRelease(fb);
     }
 
+    // Discard the "drop" frames so that the next bytesNeeded window lines up
+    // with wall clock.
+    if (dropBytes > 0) {
+        _audioStagingOffset += dropBytes;
+    }
+
     // Compact periodically to avoid unbounded growth.
     if (_audioStagingOffset > 32768) {
         NSUInteger rem = _audioStagingBuffer.length - _audioStagingOffset;
@@ -581,6 +737,7 @@ typedef NS_ENUM(NSInteger, DicoyRotation) {
 
     int16_t *src = (int16_t *)((uint8_t *)_audioStagingBuffer.bytes + _audioStagingOffset);
     _audioStagingOffset += bytesNeeded;
+    _audioSamplesDrained = wantDrainedAfterThisCall;
 
     // Convert int16 interleaved → target format and fill ioData.
     if (isFloat && isNonInter) {
